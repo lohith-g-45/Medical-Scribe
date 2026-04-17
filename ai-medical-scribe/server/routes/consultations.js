@@ -1,25 +1,40 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
+const {
+  encryptConsultationFields,
+  decryptConsultationFields,
+  decryptPatientFields,
+} = require('../utils/fieldEncryption');
+
+const AI_SUGGESTION_PREFIX = /^\s*ai\s*suggestion\s*\(\s*doctor\s*review\s*required\s*\)\s*:\s*/i;
+
+function sanitizeMedicationsText(value) {
+  const cleaned = String(value || '').replace(AI_SUGGESTION_PREFIX, '').trim();
+  return cleaned;
+}
+
+function sanitizeConsultationRecord(record = {}) {
+  return {
+    ...record,
+    medications: sanitizeMedicationsText(record.medications),
+  };
+}
 
 // Get all consultations
 router.get('/', async (req, res) => {
   try {
-    const { doctor_id, patient_id, limit = 50, offset = 0 } = req.query;
+    const doctorId = req.user.id;
+    const { patient_id, limit = 50, offset = 0 } = req.query;
 
     let query = `
       SELECT c.*, p.patient_name, p.age, p.gender, u.name as doctor_name
       FROM consultations c
       LEFT JOIN patients p ON c.patient_id = p.id
       LEFT JOIN users u ON c.doctor_id = u.id
-      WHERE 1=1
+      WHERE c.doctor_id = ?
     `;
-    let params = [];
-
-    if (doctor_id) {
-      query += ' AND c.doctor_id = ?';
-      params.push(doctor_id);
-    }
+    let params = [doctorId];
 
     if (patient_id) {
       query += ' AND c.patient_id = ?';
@@ -29,7 +44,10 @@ router.get('/', async (req, res) => {
     query += ' ORDER BY c.visit_date DESC, c.created_at DESC LIMIT ? OFFSET ?';
     params.push(parseInt(limit), parseInt(offset));
 
-    const [consultations] = await db.query(query, params);
+    const [consultationsRaw] = await db.query(query, params);
+    const consultations = consultationsRaw.map((row) =>
+      sanitizeConsultationRecord(decryptPatientFields(decryptConsultationFields(row)))
+    );
 
     res.json({
       success: true,
@@ -45,21 +63,26 @@ router.get('/', async (req, res) => {
 // Get consultation by ID
 router.get('/:id', async (req, res) => {
   try {
+    const doctorId = req.user.id;
     const { id } = req.params;
 
-    const [consultations] = await db.query(
+    const [consultationsRaw] = await db.query(
       `SELECT c.*, p.patient_name, p.age, p.gender, p.phone, p.email, 
               u.name as doctor_name, u.specialization
        FROM consultations c
        LEFT JOIN patients p ON c.patient_id = p.id
        LEFT JOIN users u ON c.doctor_id = u.id
-       WHERE c.id = ?`,
-      [id]
+       WHERE c.id = ? AND c.doctor_id = ?`,
+      [id, doctorId]
     );
 
-    if (consultations.length === 0) {
+    if (consultationsRaw.length === 0) {
       return res.status(404).json({ error: 'Consultation not found' });
     }
+
+    const consultations = consultationsRaw.map((row) =>
+      sanitizeConsultationRecord(decryptPatientFields(decryptConsultationFields(row)))
+    );
 
     // Get prescriptions if any
     const [prescriptions] = await db.query(
@@ -81,9 +104,9 @@ router.get('/:id', async (req, res) => {
 // Create new consultation
 router.post('/', async (req, res) => {
   try {
+    const doctorId = req.user.id;
     const {
       patient_id,
-      doctor_id,
       visit_date,
       transcript,
       subjective,
@@ -97,10 +120,21 @@ router.post('/', async (req, res) => {
       duration
     } = req.body;
 
+    const encrypted = encryptConsultationFields({
+      transcript,
+      subjective,
+      objective,
+      assessment,
+      plan,
+      diagnosis,
+      medications: sanitizeMedicationsText(medications),
+      follow_up,
+    });
+
     // Validation
-    if (!patient_id || !doctor_id || !visit_date) {
+    if (!patient_id || !visit_date) {
       return res.status(400).json({ 
-        error: 'Please provide required fields: patient_id, doctor_id, visit_date' 
+        error: 'Please provide required fields: patient_id, visit_date' 
       });
     }
 
@@ -110,6 +144,23 @@ router.post('/', async (req, res) => {
       return res.status(404).json({ error: 'Patient not found' });
     }
 
+    // Prevent a doctor from writing a consultation against a patient record
+    // that already belongs to another doctor's consultation history.
+    const [ownership] = await db.query(
+      `SELECT COUNT(*) as total_consultations,
+              SUM(CASE WHEN doctor_id = ? THEN 1 ELSE 0 END) as my_consultations
+       FROM consultations
+       WHERE patient_id = ?`,
+      [doctorId, patient_id]
+    );
+
+    const totalConsultations = Number(ownership[0]?.total_consultations || 0);
+    const myConsultations = Number(ownership[0]?.my_consultations || 0);
+
+    if (totalConsultations > 0 && myConsultations === 0) {
+      return res.status(403).json({ error: 'You are not authorized to add consultations for this patient' });
+    }
+
     // Insert consultation
     const [result] = await db.query(
       `INSERT INTO consultations 
@@ -117,8 +168,17 @@ router.post('/', async (req, res) => {
         assessment, plan, diagnosis, medications, follow_up, status, duration)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        patient_id, doctor_id, visit_date, transcript, subjective, objective,
-        assessment, plan, diagnosis, medications, follow_up, status, duration
+        patient_id, doctorId, visit_date,
+        encrypted.transcript,
+        encrypted.subjective,
+        encrypted.objective,
+        encrypted.assessment,
+        encrypted.plan,
+        encrypted.diagnosis,
+        encrypted.medications,
+        encrypted.follow_up,
+        status,
+        duration
       ]
     );
 
@@ -136,18 +196,34 @@ router.post('/', async (req, res) => {
 // Update consultation
 router.put('/:id', async (req, res) => {
   try {
+    const doctorId = req.user.id;
     const { id } = req.params;
     const updates = req.body;
 
+    if ('doctor_id' in updates) {
+      delete updates.doctor_id;
+    }
+
     // Check if consultation exists
-    const [existing] = await db.query('SELECT id FROM consultations WHERE id = ?', [id]);
+    const [existing] = await db.query(
+      'SELECT id FROM consultations WHERE id = ? AND doctor_id = ?',
+      [id, doctorId]
+    );
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Consultation not found' });
     }
 
     // Build update query
-    const fields = Object.keys(updates);
-    const values = Object.values(updates);
+    const normalizedUpdates = {
+      ...updates,
+      ...(Object.prototype.hasOwnProperty.call(updates, 'medications')
+        ? { medications: sanitizeMedicationsText(updates.medications) }
+        : {}),
+    };
+
+    const encryptedUpdates = encryptConsultationFields(normalizedUpdates);
+    const fields = Object.keys(encryptedUpdates);
+    const values = Object.values(encryptedUpdates);
     
     if (fields.length === 0) {
       return res.status(400).json({ error: 'No fields to update' });
@@ -174,9 +250,13 @@ router.put('/:id', async (req, res) => {
 // Delete consultation
 router.delete('/:id', async (req, res) => {
   try {
+    const doctorId = req.user.id;
     const { id } = req.params;
 
-    const [result] = await db.query('DELETE FROM consultations WHERE id = ?', [id]);
+    const [result] = await db.query(
+      'DELETE FROM consultations WHERE id = ? AND doctor_id = ?',
+      [id, doctorId]
+    );
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: 'Consultation not found' });
@@ -195,22 +275,25 @@ router.delete('/:id', async (req, res) => {
 // Get patient's consultation history
 router.get('/patient/:patient_id/history', async (req, res) => {
   try {
+    const doctorId = req.user.id;
     const { patient_id } = req.params;
 
-    const [consultations] = await db.query(
+    const [consultationsRaw] = await db.query(
       `SELECT c.id, c.visit_date, c.diagnosis, c.status, c.duration,
               u.name as doctor_name, u.specialization
        FROM consultations c
        LEFT JOIN users u ON c.doctor_id = u.id
-       WHERE c.patient_id = ?
+       WHERE c.patient_id = ? AND c.doctor_id = ?
        ORDER BY c.visit_date DESC`,
-      [patient_id]
+      [patient_id, doctorId]
     );
+
+    const history = consultationsRaw.map((row) => sanitizeConsultationRecord(decryptConsultationFields(row)));
 
     res.json({
       success: true,
-      count: consultations.length,
-      history: consultations
+      count: history.length,
+      history
     });
   } catch (error) {
     console.error('Get patient history error:', error);

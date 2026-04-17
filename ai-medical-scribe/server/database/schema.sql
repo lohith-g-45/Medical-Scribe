@@ -18,18 +18,21 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS patients (
     id INT PRIMARY KEY AUTO_INCREMENT,
     patient_name VARCHAR(255) NOT NULL,
-    age INT NOT NULL,
-    gender ENUM('Male', 'Female', 'Other') NOT NULL,
-    phone VARCHAR(20),
-    email VARCHAR(255),
+    age TEXT NOT NULL,
+    gender TEXT NOT NULL,
+    phone TEXT,
+    email TEXT,
     address TEXT,
     medical_history TEXT,
     allergies TEXT,
-    blood_group VARCHAR(10),
+    blood_group TEXT,
+    phone_hash VARCHAR(64),
+    email_hash VARCHAR(64),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_patient_name (patient_name),
-    INDEX idx_phone (phone)
+    INDEX idx_phone_hash (phone_hash),
+    INDEX idx_email_hash (email_hash)
 );
 
 -- Consultations Table
@@ -43,9 +46,9 @@ CREATE TABLE IF NOT EXISTS consultations (
     objective TEXT,
     assessment TEXT,
     plan TEXT,
-    diagnosis VARCHAR(500),
+    diagnosis TEXT,
     medications TEXT,
-    follow_up VARCHAR(255),
+    follow_up TEXT,
     status ENUM('in-progress', 'completed', 'cancelled') DEFAULT 'completed',
     duration INT COMMENT 'Duration in minutes',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

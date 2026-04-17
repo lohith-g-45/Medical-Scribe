@@ -46,15 +46,16 @@ const userRoutes = require('./routes/users');
 const notesRoutes = require('./routes/notes');
 const transcribeRoutes = require('./routes/transcribe');
 const diarizeRoutes = require('./routes/diarize');
+const { requireAuth } = require('./middleware/auth');
 
 // Use routes
 app.use('/api/auth', authRoutes);
-app.use('/api/patients', patientRoutes);
-app.use('/api/consultations', consultationRoutes);
-app.use('/api/users', userRoutes);
-app.use('/api/notes', notesRoutes);
-app.use('/api/transcribe', transcribeRoutes);
-app.use('/api/diarize', diarizeRoutes);
+app.use('/api/patients', requireAuth, patientRoutes);
+app.use('/api/consultations', requireAuth, consultationRoutes);
+app.use('/api/users', requireAuth, userRoutes);
+app.use('/api/notes', requireAuth, notesRoutes);
+app.use('/api/transcribe', requireAuth, transcribeRoutes);
+app.use('/api/diarize', requireAuth, diarizeRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

@@ -14,6 +14,8 @@ import PatientRecords from './pages/PatientRecords';
 import PatientDetail from './pages/PatientDetail';
 import Settings from './pages/Settings';
 import BodyVisualization from './pages/BodyVisualization';
+import OrgansProof from './pages/OrgansProof';
+import VirtualCoronaryPlanning3D from './pages/VirtualCoronaryPlanning3D';
 
 console.log('App.jsx loaded');
 
@@ -67,6 +69,12 @@ function App() {
             </ProtectedRoute>
           }
         />
+
+        {/* Proof route for organ-wise screenshot capture */}
+        <Route path="/proof/organs" element={<OrgansProof />} />
+
+        {/* Public demo route for virtual coronary surgery planning */}
+        <Route path="/virtual-coronary-planning" element={<VirtualCoronaryPlanning3D />} />
 
         {/* Catch all - redirect to dashboard */}
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

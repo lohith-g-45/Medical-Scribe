@@ -11,9 +11,11 @@
  */
 
 import { useMemo, useEffect, Suspense, useState, useCallback, useRef } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
+import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { useGLTF, OrbitControls, Environment, Text } from '@react-three/drei';
 import * as THREE from 'three';
+import HeartProcedureOverlays from './HeartProcedureOverlays';
+import { useHeartbeat } from '../hooks/heartAnimations';
 
 // ── Condition keyword → mesh-name(s) to highlight ─────────────────────────
 const PART_MAP = {
@@ -42,7 +44,7 @@ const PART_MAP = {
   finger:   ['hand_L', 'hand_R'],
   thigh:    ['upper_leg_L', 'upper_leg_R'],
   leg:      ['upper_leg_L', 'upper_leg_R', 'lower_leg_L', 'lower_leg_R'],
-  knee:     ['lower_leg_L', 'lower_leg_R'],
+  knee:     ['upper_leg_L', 'upper_leg_R', 'lower_leg_L', 'lower_leg_R'],
   calf:     ['lower_leg_L', 'lower_leg_R'],
   shin:     ['lower_leg_L', 'lower_leg_R'],
   ankle:    ['foot_L', 'foot_R'],
@@ -82,6 +84,92 @@ function highlightMat(hex) {
   });
 }
 
+function ghostMat() {
+  return new THREE.MeshStandardMaterial({
+    color: new THREE.Color('#2f3541'),
+    transparent: true,
+    opacity: 0.08,
+    roughness: 0.95,
+    metalness: 0.0,
+    depthWrite: false,
+  });
+}
+
+function regionEmphasisMat() {
+  return new THREE.MeshStandardMaterial({
+    color: new THREE.Color('#7d8797'),
+    transparent: true,
+    opacity: 0.28,
+    roughness: 0.82,
+    metalness: 0.02,
+  });
+}
+
+function getKneeRegionsForLaterality(laterality) {
+  if (laterality === 'Left') return ['upper_leg_L', 'lower_leg_L'];
+  if (laterality === 'Right') return ['upper_leg_R', 'lower_leg_R'];
+  return ['upper_leg_L', 'lower_leg_L', 'upper_leg_R', 'lower_leg_R'];
+}
+
+function getKneeSubpartOffset(subpart, laterality) {
+  const medialX = laterality === 'Left' ? 0.12 : laterality === 'Right' ? -0.12 : 0;
+  const lateralX = laterality === 'Left' ? -0.12 : laterality === 'Right' ? 0.12 : 0;
+
+  const base = {
+    acl: [0.0, 0.04, 0.04],
+    pcl: [0.0, -0.04, -0.06],
+    mcl: [medialX, 0.0, 0.02],
+    lcl: [lateralX, 0.0, 0.02],
+    meniscus: [0.0, -0.06, 0.06],
+    patella: [0.0, 0.02, 0.16],
+    patellar_tendon: [0.0, -0.14, 0.14],
+    generic: [0.0, 0.0, 0.11],
+  };
+
+  return base[subpart] || base.generic;
+}
+
+function KneeSubpartMarker({ anchor, subpart, label, laterality, stage = 'before', severityLevel = 3 }) {
+  const ringRef = useRef(null);
+  const haloRef = useRef(null);
+
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime();
+    const pulse = 1 + Math.sin(t * 3.6) * 0.16;
+    if (ringRef.current) ringRef.current.scale.set(pulse, pulse, pulse);
+    if (haloRef.current) haloRef.current.scale.set(1 + Math.sin(t * 2.4) * 0.20, 1 + Math.sin(t * 2.4) * 0.20, 1 + Math.sin(t * 2.4) * 0.20);
+  });
+
+  if (!anchor) return null;
+
+  const beforeColor = SEVERITY_HEX[severityLevel] || SEVERITY_HEX[3];
+  const color = stage === 'after' ? '#22c55e' : beforeColor;
+  const offset = getKneeSubpartOffset(subpart, laterality);
+  const pos = [anchor.x + offset[0], anchor.y + offset[1], anchor.z + offset[2]];
+
+  return (
+    <group position={pos}>
+      <mesh ref={haloRef}>
+        <sphereGeometry args={[0.22, 20, 20]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.55} transparent opacity={0.23} depthWrite={false} />
+      </mesh>
+      <mesh ref={ringRef} rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[0.29, 0.02, 14, 48]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.9} transparent opacity={0.95} />
+      </mesh>
+      <Text
+        position={[0, 0.36, 0.03]}
+        fontSize={0.09}
+        color={color}
+        anchorX="center"
+        anchorY="middle"
+      >
+        {label || 'Knee Injury Region'}
+      </Text>
+    </group>
+  );
+}
+
 // Extract region name from node name: "upper_leg_L_0042" → "upper_leg_L"
 function getRegion(nodeName) {
   return nodeName.replace(/_\d+$/, '');
@@ -101,9 +189,14 @@ function HumanModel({ condition, stage, onLoaded, heartOnly = false }) {
   const highlighted  = resolveHighlightNames(condition?.bodyPart, condition?.laterality);
   const sev          = condition?.severityLevel || 3;
   const hiliteHex    = isAfter ? HEALED_HEX : (SEVERITY_HEX[sev] || SEVERITY_HEX[3]);
+  const isKneeFocus  = !heartOnly && (condition?.focusMode === 'knee' || condition?.bodyPart === 'knee');
+  const [kneeAnchor, setKneeAnchor] = useState(null);
 
   // Cache original materials so switching before↔after restores anatomy colours
   useEffect(() => {
+    const targetKneeRegions = getKneeRegionsForLaterality(condition?.laterality);
+    const regionBounds = {};
+
     cloned.traverse((node) => {
       if (!node.isMesh) return;
       node.castShadow    = true;
@@ -122,20 +215,75 @@ function HumanModel({ condition, stage, onLoaded, heartOnly = false }) {
       // Save original GLB material on first run
       if (!node._origMaterial) node._origMaterial = node.material;
       const region = getRegion(node.name);
-      node.material = highlighted.has(region)
-        ? highlightMat(hiliteHex)
-        : node._origMaterial;   // original PBR material from GLB
+
+      const isKneeRegion = region.startsWith('upper_leg_') || region.startsWith('lower_leg_');
+      const isFocusKneeRegion = targetKneeRegions.includes(region);
+
+      if (isKneeFocus) {
+        if (isFocusKneeRegion && highlighted.has(region)) {
+          node.material = highlightMat(hiliteHex);
+        } else if (isFocusKneeRegion) {
+          node.material = node._regionEmphasisMaterial || (node._regionEmphasisMaterial = regionEmphasisMat());
+        } else {
+          node.material = node._ghostMaterial || (node._ghostMaterial = ghostMat());
+        }
+      } else {
+        node.material = highlighted.has(region)
+          ? highlightMat(hiliteHex)
+          : node._origMaterial;
+      }
+
+      if (isKneeFocus && isKneeRegion && isFocusKneeRegion) {
+        if (!regionBounds[region]) {
+          regionBounds[region] = new THREE.Box3();
+          regionBounds[region].makeEmpty();
+        }
+        const box = new THREE.Box3().setFromObject(node);
+        regionBounds[region].union(box);
+      }
     });
+
+    if (isKneeFocus) {
+      const combined = new THREE.Box3();
+      combined.makeEmpty();
+
+      targetKneeRegions.forEach((r) => {
+        if (regionBounds[r]) combined.union(regionBounds[r]);
+      });
+
+      if (!combined.isEmpty()) {
+        const c = new THREE.Vector3();
+        combined.getCenter(c);
+        setKneeAnchor(c);
+      } else {
+        setKneeAnchor(null);
+      }
+    } else {
+      setKneeAnchor(null);
+    }
+
     onLoaded?.();
-  }, [cloned, highlighted, hiliteHex, onLoaded, heartOnly]);
+  }, [cloned, highlighted, hiliteHex, onLoaded, heartOnly, isKneeFocus, condition?.laterality]);
 
   // GLB body: Y 0→8.2 units.  Centre at y=4.1; shift down so mid-body at origin.
   return (
-    <primitive
-      object={cloned}
-      position={[0, -4.1, 0]}
-      rotation={[0, Math.PI, 0]}
-    />
+    <group>
+      <primitive
+        object={cloned}
+        position={[0, -4.1, 0]}
+        rotation={[0, Math.PI, 0]}
+      />
+      {isKneeFocus && (
+        <KneeSubpartMarker
+          anchor={kneeAnchor}
+          subpart={condition?.kneeSubpart || 'generic'}
+          label={condition?.kneeSubpartLabel || 'Knee Injury Region'}
+          laterality={condition?.laterality}
+          stage={stage}
+          severityLevel={sev}
+        />
+      )}
+    </group>
   );
 }
 
@@ -359,7 +507,7 @@ function StageRegionMarker({ position, stage = 'before', active = false }) {
   );
 }
 
-function CoronaryFlowOverlay({ reducedFlow = false, blocked = false, stage = 'before', branch = 'rca', severityLevel = 3 }) {
+function CoronaryFlowOverlay({ reducedFlow = false, blocked = false, stage = 'before', branch = 'rca', severityLevel = 3, selectedSurgery = 'CABG' }) {
   const ladCurve = useMemo(() => new THREE.CatmullRomCurve3([
     new THREE.Vector3(-0.25, 0.28, 0.18),
     new THREE.Vector3(-0.42, 0.22, 0.34),
@@ -394,13 +542,15 @@ function CoronaryFlowOverlay({ reducedFlow = false, blocked = false, stage = 'be
   ]), []);
 
   const flowColor = stage === 'after'
-    ? '#ef4444'
+    ? '#ff5f5f'
     : reducedFlow
-      ? '#991b1b'
-      : '#dc2626';
-  const vesselColor = stage === 'after' ? '#fb7185' : '#7f1d1d';
+      ? '#9f1239'
+      : '#ef4444';
+  const vesselColor = stage === 'after' ? '#fda4af' : '#881337';
   const speed = reducedFlow && stage === 'before' ? 0.07 : stage === 'after' ? 0.24 : 0.16;
   const opacity = reducedFlow && stage === 'before' ? 0.28 : stage === 'after' ? 0.9 : 0.72;
+  const selectedCoreColor = stage === 'after' ? '#ff6b6b' : blocked ? '#7f1d1d' : '#f43f5e';
+  const selectedCoreOpacity = stage === 'after' ? 0.95 : blocked ? 0.38 : 0.78;
 
   const selectedBranchCurve = branch === 'lad'
     ? ladCurve
@@ -428,6 +578,8 @@ function CoronaryFlowOverlay({ reducedFlow = false, blocked = false, stage = 'be
   const selectedTrailStart = Math.min(0.90, blockageT + 0.05);
 
   const narrowedFlowColor = stage === 'after' ? '#16a34a' : '#ef4444';
+  const isCabg = String(selectedSurgery || '').toUpperCase() === 'CABG';
+  const showCabgLesionCallout = blocked && isCabg;
 
   return (
     <group>
@@ -453,6 +605,12 @@ function CoronaryFlowOverlay({ reducedFlow = false, blocked = false, stage = 'be
         <meshStandardMaterial color={vesselColor} emissive={vesselColor} emissiveIntensity={0.35} transparent opacity={opacity * 0.8} />
       </mesh>
 
+      {/* Selected artery lumen core for clearer branch-level interpretation */}
+      <mesh>
+        <tubeGeometry args={[selectedBranchCurve, 64, 0.0075, 10, false]} />
+        <meshStandardMaterial color={selectedCoreColor} emissive={selectedCoreColor} emissiveIntensity={0.85} transparent opacity={selectedCoreOpacity} />
+      </mesh>
+
       {blocked && stage === 'before' && (
         <mesh>
           <tubeGeometry args={[selectedBranchCurve, 64, 0.02, 10, false]} />
@@ -464,9 +622,9 @@ function CoronaryFlowOverlay({ reducedFlow = false, blocked = false, stage = 'be
       <FlowRestrictionBand curve={selectedBranchCurve} centerT={blockageT} stage={stage} active={blocked} />
 
       {/* Animated blood-flow particles */}
-      <FlowParticles curve={ladCurve} color={flowColor} speed={speed} count={14} offset={0.1} pulse={1.0} />
-      <FlowParticles curve={rcaCurve} color={flowColor} speed={speed} count={14} offset={0.5} pulse={1.05} />
-      <FlowParticles curve={lcxCurve} color={flowColor} speed={speed} count={11} offset={0.3} pulse={1.1} />
+      <FlowParticles curve={ladCurve} color={flowColor} speed={speed} count={20} offset={0.1} pulse={1.0} />
+      <FlowParticles curve={rcaCurve} color={flowColor} speed={speed} count={20} offset={0.5} pulse={1.05} />
+      <FlowParticles curve={lcxCurve} color={flowColor} speed={speed} count={16} offset={0.3} pulse={1.1} />
       <FlowParticles curve={diagonalCurve} color={flowColor} speed={speed * 0.9} count={8} offset={0.2} pulse={1.2} />
       <FlowParticles curve={pdaCurve} color={flowColor} speed={speed * 0.9} count={8} offset={0.65} pulse={0.95} />
 
@@ -510,12 +668,12 @@ function CoronaryFlowOverlay({ reducedFlow = false, blocked = false, stage = 'be
       )}
 
       {/* Blockage marker shown only when mentioned in conversation */}
-      {blocked && stage === 'before' && <BlockagePulse position={blockage.pos} />}
-      <StageRegionMarker position={blockage.pos} stage={stage} active={blocked} />
+      {showCabgLesionCallout && stage === 'before' && <BlockagePulse position={blockage.pos} />}
+      <StageRegionMarker position={blockage.pos} stage={stage} active={showCabgLesionCallout} />
       <ArteryNarrowing
         position={blockage.pos}
         rotation={blockage.rot}
-        active={blocked}
+        active={showCabgLesionCallout}
         stage={stage}
         severity={severityLevel}
       />
@@ -546,9 +704,13 @@ function IntraHeartCirculation({ stage = 'before', reducedFlow = false, blocked 
     new THREE.Vector3(0.00, 0.55, 0.10),
   ]), []);
 
-  const preColor = reducedFlow || blocked ? '#b91c1c' : '#dc2626';
-  const postColor = '#fb7185';
-  const flowColor = stage === 'after' ? postColor : preColor;
+  const leftFlowColor = stage === 'after'
+    ? '#ff6b6b'
+    : (reducedFlow || blocked ? '#9f1239' : '#ef4444');
+  const rightFlowColor = stage === 'after'
+    ? '#60a5fa'
+    : (reducedFlow || blocked ? '#1e3a8a' : '#2563eb');
+  const systemicColor = leftFlowColor;
 
   const speedPenalty = blocked ? 0.78 : 1;
   const severityPenalty = Math.max(0.65, 1 - ((severityLevel - 1) * 0.08));
@@ -561,45 +723,45 @@ function IntraHeartCirculation({ stage = 'before', reducedFlow = false, blocked 
       {/* Ventricular chamber guides to make internal circulation visible */}
       <mesh>
         <sphereGeometry args={[0.17, 20, 20]} />
-        <meshStandardMaterial color={flowColor} emissive={flowColor} emissiveIntensity={0.35} transparent opacity={stage === 'after' ? 0.12 : 0.18} />
+        <meshStandardMaterial color={leftFlowColor} emissive={leftFlowColor} emissiveIntensity={0.35} transparent opacity={stage === 'after' ? 0.12 : 0.18} />
       </mesh>
       <mesh position={[0.17, -0.02, 0.02]}>
         <sphereGeometry args={[0.13, 20, 20]} />
-        <meshStandardMaterial color={flowColor} emissive={flowColor} emissiveIntensity={0.3} transparent opacity={stage === 'after' ? 0.1 : 0.15} />
+        <meshStandardMaterial color={rightFlowColor} emissive={rightFlowColor} emissiveIntensity={0.34} transparent opacity={stage === 'after' ? 0.1 : 0.15} />
       </mesh>
 
       {/* Intrachamber loops */}
       <mesh>
         <tubeGeometry args={[leftVentricleCurve, 90, 0.01, 10, true]} />
-        <meshStandardMaterial color={flowColor} emissive={flowColor} emissiveIntensity={0.45} transparent opacity={0.8} />
+        <meshStandardMaterial color={leftFlowColor} emissive={leftFlowColor} emissiveIntensity={0.45} transparent opacity={0.8} />
       </mesh>
       <mesh>
         <tubeGeometry args={[rightVentricleCurve, 90, 0.009, 10, true]} />
-        <meshStandardMaterial color={flowColor} emissive={flowColor} emissiveIntensity={0.4} transparent opacity={0.72} />
+        <meshStandardMaterial color={rightFlowColor} emissive={rightFlowColor} emissiveIntensity={0.42} transparent opacity={0.72} />
       </mesh>
       <mesh>
         <tubeGeometry args={[systemicCurve, 40, 0.008, 10, false]} />
-        <meshStandardMaterial color={flowColor} emissive={flowColor} emissiveIntensity={0.42} transparent opacity={0.76} />
+        <meshStandardMaterial color={systemicColor} emissive={systemicColor} emissiveIntensity={0.42} transparent opacity={0.76} />
       </mesh>
 
       {/* Blood cell stream inside chambers */}
-      <FlowParticles curve={leftVentricleCurve} color={flowColor} speed={speed} count={18} offset={0.15} pulse={1.2} />
-      <FlowParticles curve={rightVentricleCurve} color={flowColor} speed={speed * 0.95} count={14} offset={0.45} pulse={1.15} />
-      <FlowParticles curve={systemicCurve} color={flowColor} speed={speed * 0.85} count={9} offset={0.25} pulse={1.1} />
+      <FlowParticles curve={leftVentricleCurve} color={leftFlowColor} speed={speed} count={22} offset={0.15} pulse={1.2} />
+      <FlowParticles curve={rightVentricleCurve} color={rightFlowColor} speed={speed * 0.95} count={18} offset={0.45} pulse={1.15} />
+      <FlowParticles curve={systemicCurve} color={systemicColor} speed={speed * 0.85} count={12} offset={0.25} pulse={1.1} />
 
       {/* Direction arrows and labels for live teaching/demo view */}
       <group>
         <mesh position={[-0.19, 0.07, 0.12]} rotation={[0.5, -0.1, 1.1]}>
           <coneGeometry args={[0.03, 0.09, 10]} />
-          <meshStandardMaterial color={flowColor} emissive={flowColor} emissiveIntensity={0.6} />
+          <meshStandardMaterial color={leftFlowColor} emissive={leftFlowColor} emissiveIntensity={0.6} />
         </mesh>
         <mesh position={[0.21, 0.08, 0.09]} rotation={[0.55, 0.1, -1.05]}>
           <coneGeometry args={[0.03, 0.09, 10]} />
-          <meshStandardMaterial color={flowColor} emissive={flowColor} emissiveIntensity={0.6} />
+          <meshStandardMaterial color={rightFlowColor} emissive={rightFlowColor} emissiveIntensity={0.62} />
         </mesh>
         <mesh position={[0.02, 0.42, 0.12]} rotation={[0.2, 0, 0]}>
           <coneGeometry args={[0.03, 0.11, 10]} />
-          <meshStandardMaterial color={flowColor} emissive={flowColor} emissiveIntensity={0.7} />
+          <meshStandardMaterial color={systemicColor} emissive={systemicColor} emissiveIntensity={0.7} />
         </mesh>
 
         <Text
@@ -634,15 +796,54 @@ function IntraHeartCirculation({ stage = 'before', reducedFlow = false, blocked 
   );
 }
 
+function SceneClipPlane({ enabled = false, cutawayLevel = 0 }) {
+  const { gl } = useThree();
+
+  useEffect(() => {
+    if (!enabled) {
+      gl.localClippingEnabled = false;
+      gl.clippingPlanes = [];
+      return;
+    }
+
+    const level = Math.max(0, Math.min(100, Number(cutawayLevel) || 0));
+    const constant = THREE.MathUtils.lerp(-2.8, 2.8, level / 100);
+    const plane = new THREE.Plane(new THREE.Vector3(1, 0, 0), constant);
+    gl.localClippingEnabled = true;
+    gl.clippingPlanes = [plane];
+
+    return () => {
+      gl.localClippingEnabled = false;
+      gl.clippingPlanes = [];
+    };
+  }, [enabled, cutawayLevel, gl]);
+
+  return null;
+}
+
 // Dedicated heart GLB model for heart-only mode
-function HeartModel({ stage, severityLevel = 3, onLoaded, visualFlags = {} }) {
+function HeartModel({ stage, severityLevel = 3, onLoaded, visualFlags = {}, selectedSurgery = 'CABG', animationsEnabled = true, procedureProgress = 0, stentTarget = 'lad', heartVerticalOffset = 1.2 }) {
   const { scene } = useGLTF('/models/realistic_human_heart.glb');
   const cloned = useMemo(() => scene.clone(true), [scene]);
+  const beatRef = useRef(null);
   const isAfter = stage === 'after';
   const colorHex = isAfter ? HEALED_HEX : (SEVERITY_HEX[severityLevel] || SEVERITY_HEX[3]);
-  const shellOpacity = isAfter ? 0.34 : 0.44;
+  const shellOpacity = isAfter ? 0.26 : 0.34;
+  const activeBranch = String(stentTarget || visualFlags?.branch || 'lad').toLowerCase();
+  const blocked = Boolean(visualFlags?.blocked);
+  const reducedFlow = Boolean(visualFlags?.reducedFlow);
+  const verticalLift = Number(heartVerticalOffset) || 0;
+  const stageYOffset = stage === 'before' ? 0.34 : 0;
+  const centerBiasY = 0;
 
-  const [fit, setFit] = useState({ centerY: 0, scale: 1.5 });
+  const [fit, setFit] = useState({ center: [0, 0, 0], scale: 1.5 });
+
+  useHeartbeat(beatRef, {
+    enabled: animationsEnabled,
+    bpm: 74,
+    intensity: 0.02,
+    baseScale: 1,
+  });
 
   useEffect(() => {
     const box = new THREE.Box3().setFromObject(cloned);
@@ -656,7 +857,7 @@ function HeartModel({ stage, severityLevel = 3, onLoaded, visualFlags = {} }) {
     const targetSpan = 5.5;
     const scale = targetSpan / maxAxis;
 
-    setFit({ centerY: center.y, scale });
+    setFit({ center: [center.x, center.y, center.z], scale });
 
     cloned.traverse((node) => {
       if (!node.isMesh) return;
@@ -665,12 +866,16 @@ function HeartModel({ stage, severityLevel = 3, onLoaded, visualFlags = {} }) {
       node.material = new THREE.MeshPhysicalMaterial({
         color: new THREE.Color(colorHex),
         emissive: new THREE.Color(colorHex),
-        emissiveIntensity: 0.35,
-        roughness: 0.45,
-        metalness: 0.02,
+        emissiveIntensity: isAfter ? 0.22 : 0.34,
+        roughness: 0.22,
+        metalness: 0.03,
         transparent: true,
         opacity: shellOpacity,
-        clearcoat: 0.35,
+        transmission: 0.55,
+        ior: 1.22,
+        thickness: 0.32,
+        clearcoat: 0.55,
+        clearcoatRoughness: 0.15,
         depthWrite: false,
         side: THREE.DoubleSide,
       });
@@ -680,40 +885,180 @@ function HeartModel({ stage, severityLevel = 3, onLoaded, visualFlags = {} }) {
   }, [cloned, colorHex, onLoaded, shellOpacity]);
 
   return (
-    <group scale={fit.scale} position={[0, -fit.centerY * fit.scale, 0]} rotation={[0, Math.PI, 0]}>
-      <primitive object={cloned} />
-      <IntraHeartCirculation
-        stage={stage}
-        reducedFlow={Boolean(visualFlags?.reducedFlow)}
-        blocked={Boolean(visualFlags?.blocked)}
-        severityLevel={severityLevel}
-      />
-      <CoronaryFlowOverlay
-        stage={stage}
-        reducedFlow={Boolean(visualFlags?.reducedFlow)}
-        blocked={Boolean(visualFlags?.blocked)}
-        branch={visualFlags?.branch || 'rca'}
-        severityLevel={severityLevel}
-      />
+    <group
+      position={[0, verticalLift + stageYOffset, 0]}
+      rotation={[0, Math.PI, 0]}
+    >
+      <group
+        ref={beatRef}
+        scale={fit.scale}
+        position={[-fit.center[0], -fit.center[1] + centerBiasY, -fit.center[2]]}
+      >
+        <primitive object={cloned} />
+        <IntraHeartCirculation
+          stage={stage}
+          reducedFlow={reducedFlow}
+          blocked={blocked}
+          severityLevel={severityLevel}
+        />
+        <CoronaryFlowOverlay
+          stage={stage}
+          reducedFlow={reducedFlow}
+          blocked={blocked}
+          branch={activeBranch}
+          severityLevel={severityLevel}
+          selectedSurgery={selectedSurgery}
+        />
+        <HeartProcedureOverlays
+          selectedSurgery={selectedSurgery}
+          stage={stage}
+          playing={animationsEnabled}
+          procedureProgress={procedureProgress}
+          stentTarget={activeBranch}
+        />
+      </group>
     </group>
   );
 }
 
 // ── Exported viewer ───────────────────────────────────────────────────────
-export default function AnatomyViewer({ condition, stage = 'before', heartOnly = false, autoRotate = false }) {
+export default function AnatomyViewer({ condition, stage = 'before', heartOnly = false, autoRotate = false, selectedSurgery = 'CABG', animationsEnabled = true, cameraDistanceMultiplier = 1, procedureProgress = 0, stentTarget = 'lad', cutawayLevel = 0, heartVerticalOffset = 1.2 }) {
   const [loaded, setLoaded] = useState(false);
+  const [manualAutoRotate, setManualAutoRotate] = useState(autoRotate);
   const onLoaded = useCallback(() => setLoaded(true), []);
+  const isKneeFocus = !heartOnly && (condition?.focusMode === 'knee' || condition?.bodyPart === 'knee');
+  const orbitRef = useRef(null);
+  const cameraRef = useRef(null);
+  const previousStageRef = useRef(stage);
+
+  const cameraConfig = useMemo(() => {
+    if (!isKneeFocus) {
+      const distanceMultiplier = Math.min(1.4, Math.max(0.65, Number(cameraDistanceMultiplier) || 1));
+      const isHeartMode = Boolean(heartOnly);
+      const heartY = Number.isFinite(Number(heartVerticalOffset)) ? Number(heartVerticalOffset) : 1.2;
+      const targetY = isHeartMode ? heartY - 0.18 : 0;
+      const heartDistance = isHeartMode ? 10 : 14;
+      const cameraY = isHeartMode ? heartY : 0;
+      return {
+        position: [0, cameraY, heartDistance * distanceMultiplier],
+        fov: isHeartMode ? 38 : 42,
+        target: [0, targetY, 0],
+        minDistance: (isHeartMode ? 1.6 : 4.2) * distanceMultiplier,
+        maxDistance: (isHeartMode ? 12 : 22) * distanceMultiplier,
+        autoRotateSpeed: 0.8,
+      };
+    }
+
+    const sideX = condition?.laterality === 'Left' ? -1.05 : condition?.laterality === 'Right' ? 1.05 : 0;
+    return {
+      position: [sideX, -1.0, 5.6],
+      fov: 36,
+      target: [sideX, -1.25, 0.05],
+      minDistance: 2.5,
+      maxDistance: 9,
+      autoRotateSpeed: 0.35,
+    };
+  }, [isKneeFocus, condition?.laterality, cameraDistanceMultiplier, heartOnly, heartVerticalOffset]);
+
+  useEffect(() => {
+    setManualAutoRotate(autoRotate);
+  }, [autoRotate, isKneeFocus, condition?.laterality, heartOnly]);
+
+  useEffect(() => {
+    if (!heartOnly) {
+      previousStageRef.current = stage;
+      return;
+    }
+
+    if (previousStageRef.current === stage) return;
+    previousStageRef.current = stage;
+
+    const controls = orbitRef.current;
+    const cam = cameraRef.current;
+    if (!controls || !cam) return;
+
+    cam.position.set(...cameraConfig.position);
+    controls.target.set(...cameraConfig.target);
+    cam.updateProjectionMatrix();
+    setManualAutoRotate(autoRotate);
+    controls.update();
+  }, [stage, heartOnly, cameraConfig, autoRotate]);
+
+  const getControlContext = () => {
+    const controls = orbitRef.current;
+    const cam = cameraRef.current;
+    if (!controls || !cam) return null;
+    return { controls, cam };
+  };
+
+  const applyManualControl = (fn) => {
+    const ctx = getControlContext();
+    if (!ctx) return;
+    setManualAutoRotate(false);
+    fn(ctx);
+    ctx.controls.update();
+  };
+
+  const zoomIn = () => {
+    applyManualControl(({ controls, cam }) => {
+      const offset = cam.position.clone().sub(controls.target);
+      const nextLen = THREE.MathUtils.clamp(offset.length() * 0.82, controls.minDistance, controls.maxDistance);
+      offset.setLength(nextLen);
+      cam.position.copy(controls.target.clone().add(offset));
+    });
+  };
+
+  const zoomOut = () => {
+    applyManualControl(({ controls, cam }) => {
+      const offset = cam.position.clone().sub(controls.target);
+      const nextLen = THREE.MathUtils.clamp(offset.length() * 1.18, controls.minDistance, controls.maxDistance);
+      offset.setLength(nextLen);
+      cam.position.copy(controls.target.clone().add(offset));
+    });
+  };
+
+  const rotateLeft = () => {
+    applyManualControl(({ controls, cam }) => {
+      const offset = cam.position.clone().sub(controls.target);
+      offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), 0.28);
+      cam.position.copy(controls.target.clone().add(offset));
+    });
+  };
+
+  const rotateRight = () => {
+    applyManualControl(({ controls, cam }) => {
+      const offset = cam.position.clone().sub(controls.target);
+      offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), -0.28);
+      cam.position.copy(controls.target.clone().add(offset));
+    });
+  };
+
+  const resetView = () => {
+    const ctx = getControlContext();
+    if (!ctx) return;
+    const { controls, cam } = ctx;
+    cam.position.set(...cameraConfig.position);
+    controls.target.set(...cameraConfig.target);
+    cam.updateProjectionMatrix();
+    setManualAutoRotate(autoRotate);
+    controls.update();
+  };
 
   return (
     <div className="relative w-full h-full">
       <Canvas
         shadows
-        camera={{ position: [0, 0, 14], fov: 42 }}
+        camera={{ position: cameraConfig.position, fov: cameraConfig.fov }}
+        onCreated={({ camera }) => {
+          cameraRef.current = camera;
+        }}
         gl={{ antialias: true, toneMappingExposure: 1.15 }}
         style={{ width: '100%', height: '100%' }}
       >
         {/* Gradient dark background matching reference image */}
         <color attach="background" args={['#0d1117']} />
+
+        <SceneClipPlane enabled={Boolean(heartOnly && cutawayLevel > 0)} cutawayLevel={cutawayLevel} />
 
         {/* Anatomy lighting: reveal muscle depth and vessel contrast */}
         {/* Soft overall bounce — low enough that vertex colours dominate */}
@@ -738,6 +1083,11 @@ export default function AnatomyViewer({ condition, stage = 'before', heartOnly =
               stage={stage}
               severityLevel={condition?.severityLevel || 3}
               visualFlags={condition?.visualFlags || {}}
+              selectedSurgery={selectedSurgery}
+              animationsEnabled={animationsEnabled}
+              procedureProgress={procedureProgress}
+              stentTarget={stentTarget}
+              heartVerticalOffset={heartVerticalOffset}
               onLoaded={onLoaded}
             />
           ) : (
@@ -747,16 +1097,25 @@ export default function AnatomyViewer({ condition, stage = 'before', heartOnly =
         </Suspense>
 
         <OrbitControls
+          ref={orbitRef}
           enablePan={false}
-          target={[0, 0, 0]}
-          minDistance={5}
-          maxDistance={22}
+          target={cameraConfig.target}
+          minDistance={cameraConfig.minDistance}
+          maxDistance={cameraConfig.maxDistance}
           minPolarAngle={0.1}
           maxPolarAngle={Math.PI - 0.1}
-          autoRotate={autoRotate}
-          autoRotateSpeed={0.8}
+          autoRotate={manualAutoRotate}
+          autoRotateSpeed={cameraConfig.autoRotateSpeed}
         />
       </Canvas>
+
+      <div className="absolute right-4 bottom-14 flex flex-col gap-2 z-20">
+        <button onClick={zoomIn} className="px-3 py-1.5 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-100 hover:bg-slate-700">Zoom In</button>
+        <button onClick={zoomOut} className="px-3 py-1.5 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-100 hover:bg-slate-700">Zoom Out</button>
+        <button onClick={rotateLeft} className="px-3 py-1.5 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-100 hover:bg-slate-700">Rotate Left</button>
+        <button onClick={rotateRight} className="px-3 py-1.5 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-100 hover:bg-slate-700">Rotate Right</button>
+        <button onClick={resetView} className="px-3 py-1.5 text-xs rounded bg-slate-800/90 border border-slate-600 text-slate-100 hover:bg-slate-700">Reset</button>
+      </div>
 
       {/* Loading spinner — disappears once GLB materials are applied */}
       {!loaded && (

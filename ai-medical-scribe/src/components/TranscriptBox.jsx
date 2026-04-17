@@ -2,9 +2,17 @@ import { motion } from 'framer-motion';
 import { FileText, Stethoscope, User, RefreshCw, Volume2 } from 'lucide-react';
 
 const TranscriptBox = ({ transcript, isRecording, isTranscribing, lang = 'en', currentSpeaker, onToggleSpeaker }) => {
-  const langLabel = lang === 'kn'
-    ? (isTranscribing ? 'Converting Kannada → English with Whisper AI…' : '🇮🇳 Live in Kannada · English translation runs after stop')
-    : '🇬🇧 Live in English';
+  const langConfig = {
+    en: { live: 'Live in English', transcribing: 'Processing English transcript…' },
+    kn: { live: 'Live in Kannada', transcribing: 'Converting Kannada to English with AI…' },
+    hi: { live: 'Live in Hindi', transcribing: 'Converting Hindi to English with AI…' },
+    ta: { live: 'Live in Tamil', transcribing: 'Converting Tamil to English with AI…' },
+  };
+
+  const selectedLang = langConfig[String(lang || 'en').toLowerCase()] || langConfig.en;
+  const langLabel = isTranscribing
+    ? selectedLang.transcribing
+    : `${selectedLang.live} · English translation runs after stop`;
 
   return (
     <div className="card h-full">
@@ -113,7 +121,7 @@ const TranscriptBox = ({ transcript, isRecording, isTranscribing, lang = 'en', c
         ) : (
           <p className="text-gray-400 text-center mt-16 text-sm">
             {isRecording
-              ? (lang === 'kn' ? 'ಕೇಳುತ್ತಿದ್ದೇನೆ… ಮಾತನಾಡಲು ಪ್ರಾರಂಭಿಸಿ' : 'Listening… start speaking')
+              ? 'Listening... start speaking'
               : 'No transcript yet. Start recording to begin.'}
           </p>
         )}

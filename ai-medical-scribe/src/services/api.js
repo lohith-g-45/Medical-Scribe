@@ -199,17 +199,45 @@ export const getPatientHistory = async (patientId) => {
 // ============================================
 
 export const uploadAudio = async (audioBlob, patientInfo = {}) => {
-  try {
-    const formData = new FormData();
-    formData.append('audio', audioBlob, 'consultation.webm');
-
-    const response = await aiApi.post('/transcribe-and-generate', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+  const toBase64 = (blob) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        try {
+          resolve(String(reader.result).split(',')[1]);
+        } catch {
+          reject({ error: 'Failed to process audio file' });
+        }
+      };
+      reader.onerror = () => reject({ error: 'Failed to read audio file' });
+      reader.readAsDataURL(blob);
     });
 
-    return response.data;
+  try {
+    // 1) Transcribe via Node backend (Groq Whisper)
+    const audioBase64 = await toBase64(audioBlob);
+    const transcribeResponse = await api.post('/transcribe', {
+      audioBase64,
+      mimeType: audioBlob.type || 'audio/webm',
+    });
+
+    const transcript = transcribeResponse.data?.transcript || '';
+    if (!transcript.trim()) {
+      throw { error: 'Transcription returned empty text' };
+    }
+
+    // 2) Generate SOAP notes via Node backend (Groq LLM)
+    const notesResponse = await api.post('/notes/generate', {
+      transcript,
+      patientInfo,
+    });
+
+    return {
+      ...notesResponse.data,
+      transcript,
+    };
   } catch (error) {
-    throw error.response?.data || { error: 'Failed to transcribe audio' };
+    throw error.response?.data || error || { error: 'Failed to transcribe audio' };
   }
 };
 
@@ -260,6 +288,58 @@ export const diarizeAudio = (audioBlob, lang = 'en') => {
 };
 
 // Local SOAP note generator used as fallback when AI backend is unavailable
+const suggestLocalMedications = (text) => {
+  const lower = String(text || '').toLowerCase();
+  if (!lower) return 'None prescribed';
+
+  const suggestions = [];
+  const add = (item) => {
+    if (!suggestions.includes(item)) suggestions.push(item);
+  };
+
+  const hasCardiacPattern = /(chest pain|angina|ischemia|ischaemia|coronary artery disease|cad|myocardial|acs|acute coronary|stemi|nstemi)/.test(lower);
+
+  if (hasCardiacPattern) {
+    add('Aspirin 75-150 mg once daily if no contraindication (AI draft for doctor confirmation)');
+    add('Atorvastatin 40 mg at night (AI draft for doctor confirmation)');
+    add('Sublingual nitroglycerin 0.4 mg as needed for chest pain if appropriate');
+  }
+
+  if (!hasCardiacPattern && /(fever|temperature|body ache|headache|myalgia|pain)/.test(lower)) {
+    add('Paracetamol 500 mg every 6-8 hours as needed (max 3 g/day)');
+  }
+  if (/(allergy|cold|rhinitis|sneezing|runny nose|itching)/.test(lower)) {
+    add('Cetirizine 10 mg once at night as needed');
+  }
+  if (/(acid|acidity|reflux|gastric|heartburn|epigastric)/.test(lower)) {
+    add('Omeprazole 20 mg once daily before breakfast for 5-7 days');
+  }
+  if (/(nausea|vomit|vomiting)/.test(lower)) {
+    add('Ondansetron 4 mg as needed for nausea/vomiting');
+  }
+  if (/(dry cough|cough)/.test(lower)) {
+    add('Dextromethorphan-based cough syrup 5-10 ml every 8 hours as needed');
+  }
+
+  const hasUtiPattern = /(uti|urinary tract infection|dysuria|burning urination|frequency|urgency|flank pain|loin pain|pyelonephritis)/.test(lower);
+  const hasRenalColicPattern = /(renal colic|kidney stone|urolithiasis|nephrolithiasis)/.test(lower);
+
+  if (hasUtiPattern) {
+    add('Nitrofurantoin 100 mg orally twice daily for 5 days if appropriate and no contraindication');
+    add('Paracetamol 500 mg orally every 6-8 hours as needed for pain/fever (max 3 g/day)');
+    add('Urinary alkalinizer syrup 10 ml in water three times daily as needed');
+  }
+
+  if (hasRenalColicPattern) {
+    add('Paracetamol 500 mg orally every 6-8 hours as needed for pain (max 3 g/day)');
+    add('Diclofenac 50 mg orally as needed for severe colicky pain if no contraindication');
+    add('Tamsulosin 0.4 mg once daily (doctor discretion based on stone profile)');
+  }
+
+  if (!suggestions.length) return 'None prescribed';
+  return suggestions.slice(0, 3).join('; ');
+};
+
 const generateNotesLocally = (transcriptText, patientInfo = {}) => {
   const lines = transcriptText
     .split('\n')
@@ -300,6 +380,8 @@ const generateNotesLocally = (transcriptText, patientInfo = {}) => {
     doctorLines.slice(-1)[0] ||
     'Treatment plan to be determined.';
 
+  const medicationsLine = suggestLocalMedications([chiefComplaintLine, history, assessmentLine, planLine, transcriptText].join(' '));
+
 
   return {
     transcript: transcriptText,
@@ -308,6 +390,7 @@ const generateNotesLocally = (transcriptText, patientInfo = {}) => {
       history: history,
       assessment: assessmentLine,
       plan: planLine,
+      medications: medicationsLine,
     },
     source: 'local',
   };
@@ -365,6 +448,7 @@ export const regenerateNotes = async (transcript) => {
     pastMedicalHistory: result?.soap_notes?.past_medical_history || '',
     assessment: result?.soap_notes?.assessment || '',
     plan: result?.soap_notes?.plan || '',
+    medications: result?.soap_notes?.medications || '',
   };
 };
 

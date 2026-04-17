@@ -1,10 +1,45 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { ArrowLeft, Activity, CheckCircle, AlertTriangle, Info, Heart } from 'lucide-react';
+import { ArrowLeft, Activity, CheckCircle, AlertTriangle, Info } from 'lucide-react';
 import { useAppContext } from '../context/AppContext';
 import AnatomyViewer from '../components/AnatomyViewer';
-import { SEVERITY_META } from '../utils/medicalBodyParser';
+import { SEVERITY_META, parseBodyCondition } from '../utils/medicalBodyParser';
 import { detectSurgeryContext } from '../utils/surgeryVideos';
+
+const SURGERY_OPTIONS = ['CABG', 'VALVE', 'STENT', 'PACEMAKER'];
+
+const SURGERY_INFO = {
+  CABG: {
+    title: 'CABG (Bypass Surgery)',
+    description: 'Shows blocked coronary flow in red and bypass graft perfusion in green.',
+  },
+  VALVE: {
+    title: 'Valve Surgery',
+    description: 'Simulates restricted valve opening before surgery and wider opening after repair/replacement.',
+  },
+  STENT: {
+    title: 'Stent Placement',
+    description: 'Visualizes narrowed artery with staged stent expansion and restored lumen width.',
+  },
+  PACEMAKER: {
+    title: 'Pacemaker',
+    description: 'Shows pacemaker device pulses and lead activity synchronized with heartbeat animation.',
+  },
+};
+
+function inferSurgeryFromText(text) {
+  const t = String(text || '').toLowerCase();
+  if (/pacemaker|bradycardia|heart block|arrhythmia/.test(t)) return 'PACEMAKER';
+  if (/stent|angioplasty|pci/.test(t)) return 'STENT';
+  if (/valve|aortic stenosis|mitral regurgitation|valvular/.test(t)) return 'VALVE';
+  if (/cabg|bypass|coronary graft/.test(t)) return 'CABG';
+  return 'CABG';
+}
+
+function normalizeSurgeryType(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return SURGERY_OPTIONS.includes(normalized) ? normalized : null;
+}
 
 export default function BodyVisualization() {
   const navigate = useNavigate();
@@ -13,6 +48,10 @@ export default function BodyVisualization() {
   const [stage, setStage] = useState('before');
   const [demoPlaying, setDemoPlaying] = useState(false);
   const [demoStep, setDemoStep] = useState(0);
+  const [selectedSurgery, setSelectedSurgery] = useState('CABG');
+  const [heartAnimationPlaying, setHeartAnimationPlaying] = useState(true);
+  const [surgerySource, setSurgerySource] = useState('manual');
+  const [analyzingSurgery, setAnalyzingSurgery] = useState(false);
 
   // Prefer navigation state (from PatientDetail) over live AppContext so that
   // existing saved records can also be visualised.
@@ -40,30 +79,33 @@ export default function BodyVisualization() {
     return 'rca';
   }, [rawText]);
 
-  // Heart-only condition model for visualization (no whole-body mapping).
+  const parsedCondition = useMemo(
+    () => parseBodyCondition(stateNotes || {}, stateTranscript || ''),
+    [stateNotes, stateTranscript]
+  );
+
   const condition = {
-    bodyPart: 'chest',
-    bodyPartName: 'Heart',
-    bodyPartIcon: '❤️',
+    ...parsedCondition,
+    // Keep severity inferred from full transcript context for consistent visual intensity.
     severityLevel: inferredSeverity,
-    laterality: '',
-    treatmentType: 'surgery',
-    beforeDescription: 'Heart-related condition identified from consultation. Visualization focuses only on heart region.',
-    afterDescription: 'Post-treatment view of the heart region after surgical intervention.',
-    affectedMeshes: ['chest'],
     visualFlags: {
       blocked: showBlockage && hasBlockageSignal,
       reducedFlow: showReducedFlow && hasReducedFlowSignal,
       branch: coronaryBranch,
     },
+    patientGender: patientInfo?.gender || patientInfo?.sex || '',
   };
+  const cardiacSignal = /heart|cardiac|coronary|stent|angioplasty|cabg|bypass|valve|myocard/i.test(rawText);
+  const surgeryContext = detectSurgeryContext(stateNotes, stateTranscript);
+  const isCardiacSurgeryCase = Boolean(surgeryContext?.hasSurgery && cardiacSignal);
+  const useHeartOnly = isCardiacSurgeryCase;
+  const surgeryInfo = SURGERY_INFO[selectedSurgery] || SURGERY_INFO.CABG;
   const meta = SEVERITY_META[condition.severityLevel] || SEVERITY_META[3];
-  const surgery = detectSurgeryContext(stateNotes, stateTranscript);
   const demoDurationMs = 3200;
   const demoLabels = [
-    'Baseline circulation',
-    'Reduced perfusion view',
-    'Coronary blockage focus',
+    'Baseline anatomy view',
+    'Clinical highlight view',
+    'Focused severity view',
     'Post-treatment recovery',
   ];
 
@@ -104,34 +146,49 @@ export default function BodyVisualization() {
     return () => window.clearTimeout(timer);
   }, [demoPlaying, demoStep, demoDurationMs, hasReducedFlowSignal, hasBlockageSignal]);
 
-  if (!surgery.hasSurgery) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-white flex flex-col">
-        <header className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50 bg-slate-900/60">
-          <button
-            onClick={() => navigate(-1)}
-            className="flex items-center gap-2 text-slate-300 hover:text-white transition-colors"
-          >
-            <ArrowLeft size={18} />
-            <span className="text-sm font-medium">Back</span>
-          </button>
-          <div className="flex items-center gap-2 text-white">
-            <Activity size={18} className="text-blue-400" />
-            <span className="font-semibold">Heart Surgery Visualization</span>
-          </div>
-          <span className="text-sm text-slate-400">Heart surgery only</span>
-        </header>
-        <div className="flex-1 flex items-center justify-center p-6">
-          <div className="max-w-xl w-full bg-slate-900/70 border border-slate-700 rounded-xl p-6 text-center">
-            <h2 className="text-xl font-bold mb-2">Visualization Not Available</h2>
-            <p className="text-slate-300 text-sm">
-              This view is enabled only when conversation indicates both heart-related diagnosis and surgery.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (!useHeartOnly) return;
+    const inferred = inferSurgeryFromText(rawText);
+    setSelectedSurgery(inferred);
+    setSurgerySource('notes');
+  }, [useHeartOnly, rawText]);
+
+  useEffect(() => {
+    if (!useHeartOnly) return;
+
+    const controller = new AbortController();
+    const analyze = async () => {
+      try {
+        setAnalyzingSurgery(true);
+        const flaskBase = import.meta.env.VITE_FLASK_API_URL || 'http://localhost:8000';
+        const response = await fetch(`${flaskBase}/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            notes: stateNotes || {},
+            transcript: stateTranscript || '',
+            text: rawText,
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) return;
+        const data = await response.json();
+        const recommended = normalizeSurgeryType(data?.recommended_surgery);
+        if (recommended) {
+          setSelectedSurgery(recommended);
+          setSurgerySource('backend');
+        }
+      } catch {
+        // Keep inferred/manual selection when backend is unavailable.
+      } finally {
+        if (!controller.signal.aborted) setAnalyzingSurgery(false);
+      }
+    };
+
+    analyze();
+    return () => controller.abort();
+  }, [useHeartOnly, stateNotes, stateTranscript, rawText]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 flex flex-col">
@@ -146,7 +203,7 @@ export default function BodyVisualization() {
         </button>
         <div className="flex items-center gap-2 text-white">
           <Activity size={18} className="text-blue-400" />
-          <span className="font-semibold">Surgery Visualization</span>
+          <span className="font-semibold">Body Visualization</span>
         </div>
         {patientInfo?.name && (
           <span className="text-sm text-slate-400">{patientInfo.name}</span>
@@ -156,7 +213,14 @@ export default function BodyVisualization() {
       <div className="flex overflow-hidden" style={{ height: 'calc(100vh - 65px)' }}>
         {/* ── LEFT: 3D canvas ── */}
         <div className="flex-1 relative" style={{ minHeight: 0 }}>
-          <AnatomyViewer condition={condition} stage={stage} heartOnly={true} autoRotate={true} />
+          <AnatomyViewer
+            condition={condition}
+            stage={stage}
+            heartOnly={useHeartOnly}
+            autoRotate={true}
+            selectedSurgery={selectedSurgery}
+            animationsEnabled={heartAnimationPlaying}
+          />
 
           {/* Stage label overlay */}
           <div className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none">
@@ -268,7 +332,7 @@ export default function BodyVisualization() {
                 <span className="text-2xl">{condition.bodyPartIcon}</span>
                 <div>
                   <p className="font-bold text-white capitalize">
-                    {surgery.topicLabel}
+                    {condition.bodyPartName}
                   </p>
                   <p className="text-xs" style={{ color: isAfter ? '#86efac' : meta.textColor }}>
                     {isAfter ? 'Recovered' : meta.label}
@@ -307,27 +371,55 @@ export default function BodyVisualization() {
               </div>
             )}
 
-            <div className="rounded-xl border border-slate-700 bg-slate-800/60 px-4 py-3">
-              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                Heart Problem Details (From Conversation)
-              </p>
-              {surgery.detailLines?.length ? (
-                <ul className="space-y-1.5 text-sm text-slate-200">
-                  {surgery.detailLines.map((line) => (
-                    <li key={line} className="flex items-start gap-2">
-                      <Heart size={14} className="text-red-400 mt-1 shrink-0" />
-                      <span>{line}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-slate-400">No detailed heart findings captured from transcript.</p>
-              )}
-            </div>
+            {useHeartOnly && (
+              <div className="rounded-xl border border-slate-700 bg-slate-800/60 px-4 py-3 space-y-3">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  Cardiac Procedure View
+                </p>
 
+                <div className="space-y-2">
+                  <label className="text-xs text-slate-400">Procedure</label>
+                  <select
+                    value={selectedSurgery}
+                    onChange={(e) => {
+                      const next = normalizeSurgeryType(e.target.value) || 'CABG';
+                      setSelectedSurgery(next);
+                      setSurgerySource('manual');
+                    }}
+                    className="w-full bg-slate-900 border border-slate-700 text-slate-100 rounded-lg px-3 py-2 text-sm"
+                  >
+                    {SURGERY_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setHeartAnimationPlaying((v) => !v)}
+                    className="flex-1 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-medium transition-colors"
+                  >
+                    {heartAnimationPlaying ? 'Pause Animation' : 'Play Animation'}
+                  </button>
+                </div>
+
+                <div className="text-xs text-slate-400">
+                  Source: <span className="font-semibold text-slate-300 uppercase">{surgerySource}</span>
+                  {analyzingSurgery && <span className="ml-2 text-cyan-300">Analyzing...</span>}
+                </div>
+
+                <div className="rounded-lg border border-slate-700 bg-slate-900/50 px-3 py-2">
+                  <p className="text-sm font-semibold text-slate-100">{surgeryInfo.title}</p>
+                  <p className="text-xs text-slate-400 mt-1">{surgeryInfo.description}</p>
+                </div>
+              </div>
+            )}
+
+            {(condition.bodyPart === 'chest' || hasBlockageSignal || hasReducedFlowSignal) && (
             <div className="rounded-xl border border-slate-700 bg-slate-800/60 px-4 py-3 space-y-3">
               <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                Visual Overlay Controls
+                Heart Overlay Controls
               </p>
 
               <label className={`flex items-center justify-between gap-3 text-sm ${hasReducedFlowSignal ? 'text-slate-200' : 'text-slate-500'}`}>
@@ -356,13 +448,14 @@ export default function BodyVisualization() {
                 Coronary branch focus: <span className="font-semibold text-slate-300 uppercase">{coronaryBranch}</span>
               </div>
             </div>
+            )}
 
             <div className="rounded-xl border border-slate-700 bg-slate-800/60 px-4 py-3">
               <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
                 Source
               </p>
               <p className="text-sm text-slate-200">
-                3D view is shown only because heart-related surgery was detected in consultation notes/transcript.
+                3D highlights are generated from parsed SOAP notes and transcript context.
               </p>
             </div>
 

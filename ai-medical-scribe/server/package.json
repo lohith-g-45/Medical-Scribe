@@ -5,7 +5,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "prepare:encryption-schema": "node prepare_encryption_schema.js",
+    "encrypt:consultations": "node encrypt_existing_consultations.js",
+    "encrypt:patients": "node encrypt_existing_patients.js",
+    "backfill:medications": "node backfill_consultation_medications.js"
   },
   "keywords": [
     "medical",

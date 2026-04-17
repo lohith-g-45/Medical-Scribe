@@ -147,6 +147,44 @@ class TextRequest(BaseModel):
     language: str = "en"
 
 
+class AnalyzeRequest(BaseModel):
+    notes: Optional[dict] = None
+    transcript: str = ""
+    text: str = ""
+
+
+def infer_recommended_surgery(payload: AnalyzeRequest) -> str:
+    notes = payload.notes or {}
+    chunks = [
+        payload.text or "",
+        payload.transcript or "",
+        str(notes.get("assessment", "")),
+        str(notes.get("plan", "")),
+        str(notes.get("chiefComplaint", "")),
+        str(notes.get("historyOfPresentIllness", "")),
+    ]
+    all_text = " ".join(chunks).lower()
+
+    cardiac_signals = [
+        "heart", "cardiac", "coronary", "cabg", "bypass", "valve", "stent", "angioplasty",
+        "pci", "pacemaker", "arrhythmia", "bradycardia", "heart block", "aortic", "mitral",
+        "lad", "rca", "lcx",
+    ]
+
+    if not any(k in all_text for k in cardiac_signals):
+        return "NONE"
+
+    if any(k in all_text for k in ["pacemaker", "bradycardia", "heart block", "arrhythmia"]):
+        return "PACEMAKER"
+    if any(k in all_text for k in ["stent", "angioplasty", "pci"]):
+        return "STENT"
+    if any(k in all_text for k in ["valve", "aortic stenosis", "mitral regurgitation", "valvular"]):
+        return "VALVE"
+    if any(k in all_text for k in ["cabg", "bypass", "coronary graft"]):
+        return "CABG"
+    return "CABG"
+
+
 @app.post("/api/process-text")
 async def process_text(req: TextRequest):
     """Process text input and generate SOAP notes"""
@@ -186,6 +224,22 @@ async def process_text(req: TextRequest):
     except Exception as e:
         logger.error(f"process-text error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/analyze")
+@app.post("/api/analyze")
+async def analyze_surgery(req: AnalyzeRequest):
+    """Return recommended cardiac surgery type for heart visualization overlays."""
+    try:
+        recommended = infer_recommended_surgery(req)
+        return {
+            "recommended_surgery": recommended,
+            "source": "rule-based",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        logger.error(f"analyze error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to analyze surgery recommendation")
 
 
 @app.post("/api/transcribe-and-generate")

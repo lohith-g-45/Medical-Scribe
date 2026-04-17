@@ -3,12 +3,53 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Sparkles, User, ArrowRight, UserCircle, Stethoscope } from 'lucide-react';
 import Header from '../components/layout/Header';
-import TranscriptBox from '../components/TranscriptBox';
 import ConsultationReport from '../components/ConsultationReport';
 import { useAppContext } from '../context/AppContext';
 import { createPatient, generateNotes, uploadAudio, saveConsultation, transcribeAudio, diarizeAudio, resolveExistingPatient } from '../services/api';
 import { useToast } from '../components/Toast';
 import Loading from '../components/Loading';
+
+const CONSULTATION_LANGUAGES = {
+  en: {
+    code: 'en',
+    label: 'English',
+    display: 'English',
+    locale: 'en-IN',
+    badge: 'English mode',
+  },
+  kn: {
+    code: 'kn',
+    label: 'Kannada',
+    display: 'ಕನ್ನಡ (Kannada)',
+    locale: 'kn-IN',
+    badge: 'Kannada mode',
+  },
+  hi: {
+    code: 'hi',
+    label: 'Hindi',
+    display: 'हिंदी (Hindi)',
+    locale: 'hi-IN',
+    badge: 'Hindi mode',
+  },
+  ta: {
+    code: 'ta',
+    label: 'Tamil',
+    display: 'தமிழ் (Tamil)',
+    locale: 'ta-IN',
+    badge: 'Tamil mode',
+  },
+};
+
+const CONSULTATION_LANGUAGE_LIST = [
+  CONSULTATION_LANGUAGES.en,
+  CONSULTATION_LANGUAGES.kn,
+  CONSULTATION_LANGUAGES.hi,
+  CONSULTATION_LANGUAGES.ta,
+];
+
+function getLanguageConfig(code) {
+  return CONSULTATION_LANGUAGES[String(code || 'en').toLowerCase()] || CONSULTATION_LANGUAGES.en;
+}
 
 const StartConsultation = () => {
   const navigate = useNavigate();
@@ -60,15 +101,19 @@ const StartConsultation = () => {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isDiarizing, setIsDiarizing] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const recordingSecondsRef = useRef(0);
   // Language the doctor selects before recording: 'en' = English, 'kn' = Kannada
   const [consultationLang, setConsultationLang] = useState('en');
   const consultationLangRef = useRef('en'); // accessible inside async callbacks
   
   // Speaker tracking from backend live pipeline
   const [currentSpeaker, setCurrentSpeaker] = useState('Doctor'); // 'Doctor' or 'Patient'
+  const [liveUtterances, setLiveUtterances] = useState([]); // [{ speaker, text, atSec, source }]
   const lastSpeakerRef = useRef('Doctor');
   const liveTranscriptRef = useRef(''); // mirrors transcript state — readable inside onstop closure
   const speakerPauseTimerRef = useRef(null); // pause-based auto speaker switch
+  const recentLiveLinesRef = useRef([]); // dedupe cache
+  const wsStreamingActiveRef = useRef(false);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const mediaStreamRef = useRef(null);
@@ -109,16 +154,64 @@ const StartConsultation = () => {
     setCurrentSpeaker(next);
   };
 
-  const appendTranscriptLine = (speaker, text) => {
+  const normalizeLineForDedupe = (text) =>
+    String(text || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const cleanLiveText = (text) => {
+    let out = String(text || '').trim();
+    out = out.replace(/\s+/g, ' ');
+    out = out.replace(/\b(hello\s+doctor)\b(?:\s+\1\b)+/gi, '$1');
+    out = out.replace(/\b([a-z][a-z']+)\b(?:\s+\1\b)+/gi, '$1');
+    if (!out) return '';
+    out = out.charAt(0).toUpperCase() + out.slice(1);
+    if (!/[.!?]$/.test(out)) out += '.';
+    return out;
+  };
+
+  const shouldSkipLiveLine = (speaker, text) => {
+    const norm = normalizeLineForDedupe(text);
+    if (!norm) return true;
+
+    const now = Date.now();
+    recentLiveLinesRef.current = recentLiveLinesRef.current.filter((x) => now - x.ts < 12000);
+
+    const duplicate = recentLiveLinesRef.current.some((x) =>
+      x.speaker === speaker && (x.norm === norm || x.norm.includes(norm) || norm.includes(x.norm))
+    );
+
+    if (duplicate) return true;
+
+    recentLiveLinesRef.current.push({ speaker, norm, ts: now });
+    return false;
+  };
+
+  const appendTranscriptLine = (speaker, text, source = 'live') => {
     if (!text?.trim()) {
       return;
     }
 
-    const normalized = text.trim();
+    const normalized = cleanLiveText(text);
+    if (!normalized) return;
+    if (shouldSkipLiveLine(speaker, normalized)) return;
+
     const line = `${speaker}: ${normalized}`;
     liveTranscriptRef.current = liveTranscriptRef.current?.trim()
       ? `${liveTranscriptRef.current}\n\n${line}`
       : line;
+
+    setLiveUtterances((prev) => [
+      ...prev,
+      {
+        speaker,
+        text: normalized,
+        atSec: recordingSecondsRef.current,
+        source,
+      },
+    ]);
 
     setTranscript((prev) => {
       if (!prev?.trim()) {
@@ -133,7 +226,11 @@ const StartConsultation = () => {
       clearInterval(timerRef.current);
     }
     timerRef.current = setInterval(() => {
-      setRecordingSeconds((prev) => prev + 1);
+      setRecordingSeconds((prev) => {
+        const next = prev + 1;
+        recordingSecondsRef.current = next;
+        return next;
+      });
     }, 1000);
   };
 
@@ -181,8 +278,11 @@ const StartConsultation = () => {
 
   const normalizeDigits = (val) => String(val || '').replace(/\D/g, '');
 
-  const applyReturningPatient = (p, matchedBy = 'record') => {
-    setReturningPatient(p);
+  const applyReturningPatient = (p, matchedBy = 'record', lastConsultation = null) => {
+    setReturningPatient({
+      ...p,
+      lastConsultation: lastConsultation || null,
+    });
     setShowReturningBanner(true);
     setFormData((prev) => ({
       ...prev,
@@ -218,7 +318,11 @@ const StartConsultation = () => {
 
       const found = resolved?.patient || null;
       if (found) {
-        applyReturningPatient(found, resolved?.matchedBy || 'record');
+        applyReturningPatient(
+          found,
+          resolved?.matchedBy || 'record',
+          resolved?.lastConsultation || null
+        );
       } else {
         setReturningPatient(null);
         setShowReturningBanner(false);
@@ -332,6 +436,7 @@ const StartConsultation = () => {
   // Kannada mode  → kn-IN, shows live Kannada script; Whisper translates after stop.
   const speechRecognitionRef = useRef(null);
   const speechRecognitionKnRef = useRef(null); // unused, kept for cleanup safety
+  const browserLiveEnabledRef = useRef(false);
 
   const makeSpeechRecognition = (lang) => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -353,8 +458,10 @@ const StartConsultation = () => {
         const result = event.results[i];
         if (result.isFinal) {
           const text = result[0].transcript.trim();
-          // Use the current speaker from the ref (updates when toggled)
-          if (text) appendTranscriptLine(lastSpeakerRef.current, text);
+          // Keep browser recognition as fallback when WS stream has not started.
+          if (text && !wsStreamingActiveRef.current) {
+            appendTranscriptLine(lastSpeakerRef.current, text, 'browser');
+          }
 
           // After this utterance ends, start a silence timer.
           // If nobody speaks for PAUSE_SWITCH_MS, auto-switch speaker.
@@ -378,8 +485,10 @@ const StartConsultation = () => {
   };
 
   const startBrowserTranscription = () => {
-    const lang = consultationLangRef.current === 'kn' ? 'kn-IN' : 'en-IN';
-    speechRecognitionRef.current = makeSpeechRecognition(lang);
+    const langConfig = getLanguageConfig(consultationLangRef.current);
+    speechRecognitionRef.current = makeSpeechRecognition(langConfig.locale);
+    browserLiveEnabledRef.current = Boolean(speechRecognitionRef.current);
+    return browserLiveEnabledRef.current;
   };
 
   const stopBrowserTranscription = () => {
@@ -395,18 +504,23 @@ const StartConsultation = () => {
       try { speechRecognitionKnRef.current.stop(); } catch (_) {}
       speechRecognitionKnRef.current = null;
     }
+    browserLiveEnabledRef.current = false;
   };
 
   // Start recording and speech recognition
   const handleStartRecording = async () => {
     setTranscript('');
     setUtterances([]);
+    setLiveUtterances([]);
     setAudioBlob(null);
     setHasRecorded(false);
     setRecordingSeconds(0);
+    recordingSecondsRef.current = 0;
     setCurrentSpeaker('Doctor');
     lastSpeakerRef.current = 'Doctor';
     liveTranscriptRef.current = '';
+    recentLiveLinesRef.current = [];
+    wsStreamingActiveRef.current = false;
     consultationLangRef.current = consultationLang; // snapshot selected lang for callbacks
     consultationStartTimeRef.current = new Date().toISOString();
 
@@ -426,11 +540,21 @@ const StartConsultation = () => {
 
           const speaker = payload.speaker || lastSpeakerRef.current || 'Unknown';
           const text = payload.translated_text || payload.original_text || '';
+          const selectedLang = String(consultationLangRef.current || 'en').toLowerCase();
+          const useWsTranscriptText = selectedLang === 'en';
 
           if (text.trim()) {
+            if (useWsTranscriptText) {
+              wsStreamingActiveRef.current = true;
+            }
             lastSpeakerRef.current = speaker;
             setCurrentSpeaker(speaker);
-            appendTranscriptLine(speaker, text);
+
+            // For non-English modes, keep browser locale transcript as the live preview source
+            // to avoid mixed-script WS output. WS is still used for speaker hints.
+            if (useWsTranscriptText) {
+              appendTranscriptLine(speaker, text, 'ws');
+            }
           }
         } catch (err) {
           console.error('Invalid WS message:', err);
@@ -505,7 +629,7 @@ const StartConsultation = () => {
         setIsDiarizing(true);
         try {
           const result = await diarizeAudio(blob, consultationLangRef.current);
-          const hasTwoSpeakers = (result?.speakerCount ?? 0) >= 2;
+          const hasTwoSpeakers = Boolean(result?.reliableTwoSpeaker) || (result?.diarizationMode === 'assemblyai' && (result?.speakerCount ?? 0) >= 2);
 
           if (hasTwoSpeakers && result?.fullText?.trim()) {
             // AssemblyAI successfully found Doctor + Patient — use it
@@ -516,8 +640,9 @@ const StartConsultation = () => {
           }
 
           if (result?.fullText?.trim() && !hasTwoSpeakers) {
-            // AssemblyAI only detected 1 speaker — keep the live preview, don't overwrite
-            toast.warning('AssemblyAI only detected 1 voice. Keeping your live preview transcript.');
+            // Low-confidence split (or single-speaker) — keep the live preview, don't overwrite
+            const mode = result?.diarizationMode === 'heuristic-fallback' ? 'low-confidence split' : 'single-speaker';
+            toast.warning(`Diarization returned ${mode}. Keeping your live preview transcript.`);
             // Still save utterances for context but do NOT overwrite transcript
             setUtterances(result.utterances || []);
             return;
@@ -568,9 +693,14 @@ const StartConsultation = () => {
       setIsRecording(true);
       startTimer();
 
+      // Always run browser speech recognition for immediate live transcript preview.
+      // WebSocket diarization (if available) still updates speaker identity in parallel.
+      const browserLiveStarted = startBrowserTranscription();
+
       if (!wsConnected) {
         toast.warning('AI backend unavailable. Using browser speech recognition for transcription.');
-        startBrowserTranscription();
+      } else if (!browserLiveStarted) {
+        toast.warning('Live preview is not supported in this browser. Final transcript after stop will still work.');
       }
     } catch (error) {
       console.error('Error starting media recorder:', error);
@@ -631,6 +761,7 @@ const StartConsultation = () => {
         pastMedicalHistory: soap.past_medical_history || '',
         assessment: soap.assessment || '',
         plan: soap.plan || '',
+        medications: soap.medications || 'None prescribed',
       };
 
       // If patient was in local-only mode, save them to DB now before navigating
@@ -831,6 +962,19 @@ const StartConsultation = () => {
                         <strong>{returningPatient.patient_name}</strong> (Age: {returningPatient.age}, {returningPatient.gender}) is already in your records.
                         Continue as a returning patient to add this consultation to their history.
                       </p>
+                      {returningPatient.lastConsultation?.summary && (
+                        <div className="mb-3 rounded-lg border border-blue-200 bg-white p-3">
+                          <p className="text-xs font-semibold text-blue-700 mb-1">
+                            Last consultation
+                            {returningPatient.lastConsultation.visitDate
+                              ? ` (${returningPatient.lastConsultation.visitDate})`
+                              : ''}
+                          </p>
+                          <p className="text-sm text-slate-700">
+                            {returningPatient.lastConsultation.summary}
+                          </p>
+                        </div>
+                      )}
                       <div className="flex space-x-3">
                         <button
                           type="button"
@@ -918,7 +1062,7 @@ const StartConsultation = () => {
               </motion.div>
 
               {/* Main Grid */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+              <div className="grid grid-cols-1 gap-6 mb-6">
                 {/* Audio Recorder with custom controls */}
                 <div className="card text-center">
                   <div className="mb-6">
@@ -953,27 +1097,21 @@ const StartConsultation = () => {
                   {/* Language Toggle — only show before recording starts */}
                   {!isRecording && !hasRecorded && (
                     <div className="flex items-center justify-center mb-5">
-                      <div className="inline-flex items-center bg-gray-100 rounded-full p-1 space-x-1">
-                        <button
-                          onClick={() => setConsultationLang('en')}
-                          className={`px-5 py-2 rounded-full text-sm font-semibold transition-all ${
-                            consultationLang === 'en'
-                              ? 'bg-white text-blue-600 shadow'
-                              : 'text-gray-500 hover:text-gray-700'
-                          }`}
+                      <div className="w-full max-w-sm">
+                        <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 text-left">
+                          Consultation language
+                        </label>
+                        <select
+                          value={consultationLang}
+                          onChange={(e) => setConsultationLang(e.target.value)}
+                          className="input-field"
                         >
-                          🇬🇧 English
-                        </button>
-                        <button
-                          onClick={() => setConsultationLang('kn')}
-                          className={`px-5 py-2 rounded-full text-sm font-semibold transition-all ${
-                            consultationLang === 'kn'
-                              ? 'bg-white text-orange-600 shadow'
-                              : 'text-gray-500 hover:text-gray-700'
-                          }`}
-                        >
-                          🇮🇳 ಕನ್ನಡ (Kannada)
-                        </button>
+                          {CONSULTATION_LANGUAGE_LIST.map((opt) => (
+                            <option key={opt.code} value={opt.code}>
+                              {opt.display}
+                            </option>
+                          ))}
+                        </select>
                       </div>
                     </div>
                   )}
@@ -981,13 +1119,21 @@ const StartConsultation = () => {
                   {/* Active language indicator while recording */}
                   {isRecording && (
                     <div className="flex justify-center mb-4">
+                      {(() => {
+                        const langCfg = getLanguageConfig(consultationLang);
+                        const nonEnglish = langCfg.code !== 'en';
+                        return (
                       <span className={`text-xs font-semibold px-3 py-1 rounded-full ${
-                        consultationLang === 'kn'
+                        nonEnglish
                           ? 'bg-orange-100 text-orange-700'
                           : 'bg-blue-100 text-blue-700'
                       }`}>
-                        {consultationLang === 'kn' ? '🇮🇳 ಕನ್ನಡ mode — Whisper will translate after stop' : '🇬🇧 English mode'}
+                        {nonEnglish
+                          ? `${langCfg.badge} - Whisper will translate after stop`
+                          : langCfg.badge}
                       </span>
+                        );
+                      })()}
                     </div>
                   )}
 
@@ -1059,16 +1205,6 @@ const StartConsultation = () => {
                   </p>
                 </div>
                 
-                {/* Transcript Box */}
-                <TranscriptBox 
-                  transcript={transcript}
-                  isRecording={isRecording}
-                  isTranscribing={isTranscribing || isDiarizing}
-                  lang={consultationLang}
-                  currentSpeaker={currentSpeaker}
-                  onToggleSpeaker={isRecording ? toggleSpeaker : undefined}
-                />
-
                 {/* Transcribing overlay */}
                 {isTranscribing && (
                   <motion.div
@@ -1149,15 +1285,15 @@ const StartConsultation = () => {
                     </li>
                     <li className="flex items-start">
                       <span className="font-semibold text-primary mr-2">2.</span>
-                      <span>Speak in <strong>English</strong>, <strong>Kannada (ಕನ್ನಡ)</strong>, or <strong>Kanglish</strong> — all are supported.</span>
+                      <span>Choose language from dropdown and speak in <strong>English</strong>, <strong>Kannada</strong>, <strong>Hindi</strong>, or <strong>Tamil</strong>.</span>
                     </li>
                     <li className="flex items-start">
                       <span className="font-semibold text-primary mr-2">3.</span>
-                      <span>The <em>Live Transcript</em> is an approximate preview. Kannada words may appear as transliteration — that is normal.</span>
+                      <span>The <em>Live Transcript</em> is an approximate preview. Regional language words may appear as transliteration — that is normal.</span>
                     </li>
                     <li className="flex items-start">
                       <span className="font-semibold text-primary mr-2">4.</span>
-                      <span>After you <strong>stop recording</strong>, Groq Whisper AI will produce an accurate <strong>English transcript</strong> automatically replacing the preview.</span>
+                      <span>After you <strong>stop recording</strong>, AI will produce an accurate <strong>English transcript</strong> automatically replacing the preview.</span>
                     </li>
                     <li className="flex items-start">
                       <span className="font-semibold text-primary mr-2">5.</span>

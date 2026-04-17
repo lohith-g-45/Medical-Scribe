@@ -6,9 +6,15 @@ const db = require('../config/database');
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const requestedUserId = parseInt(id, 10);
+
+    if (req.user.role !== 'admin' && req.user.id !== requestedUserId) {
+      return res.status(403).json({ error: 'You are not authorized to access this user profile' });
+    }
+
     const [rows] = await db.query(
       'SELECT id, name, email, role, specialization, created_at, updated_at FROM users WHERE id = ?',
-      [id]
+      [requestedUserId]
     );
 
     if (rows.length === 0) {
@@ -26,21 +32,26 @@ router.get('/:id', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    const requestedUserId = parseInt(id, 10);
     const { name, email, specialization } = req.body;
 
-    const [existing] = await db.query('SELECT id FROM users WHERE id = ?', [id]);
+    if (req.user.role !== 'admin' && req.user.id !== requestedUserId) {
+      return res.status(403).json({ error: 'You are not authorized to update this user profile' });
+    }
+
+    const [existing] = await db.query('SELECT id FROM users WHERE id = ?', [requestedUserId]);
     if (existing.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     await db.query(
       'UPDATE users SET name = ?, email = ?, specialization = ? WHERE id = ?',
-      [name || null, email || null, specialization || null, id]
+      [name || null, email || null, specialization || null, requestedUserId]
     );
 
     const [updated] = await db.query(
       'SELECT id, name, email, role, specialization, created_at, updated_at FROM users WHERE id = ?',
-      [id]
+      [requestedUserId]
     );
 
     res.json({ success: true, user: updated[0], message: 'Profile updated successfully' });
@@ -54,7 +65,12 @@ router.put('/:id', async (req, res) => {
 router.put('/:id/settings', async (req, res) => {
   try {
     const { id } = req.params;
+    const requestedUserId = parseInt(id, 10);
     const settings = req.body || {};
+
+    if (req.user.role !== 'admin' && req.user.id !== requestedUserId) {
+      return res.status(403).json({ error: 'You are not authorized to update these settings' });
+    }
 
     await db.query(
       `CREATE TABLE IF NOT EXISTS user_settings (
@@ -69,7 +85,7 @@ router.put('/:id/settings', async (req, res) => {
       `INSERT INTO user_settings (user_id, settings_json)
        VALUES (?, ?)
        ON DUPLICATE KEY UPDATE settings_json = VALUES(settings_json)`,
-      [id, JSON.stringify(settings)]
+      [requestedUserId, JSON.stringify(settings)]
     );
 
     res.json({ success: true, message: 'Settings updated successfully' });

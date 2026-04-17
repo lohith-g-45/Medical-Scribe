@@ -60,7 +60,7 @@ const GeneratedNotes = () => {
         assessment: notes?.assessment || '',
         plan: notes?.plan || '',
         diagnosis: notes?.assessment || 'General consultation',
-        medications: notes?.pastMedicalHistory || '',
+        medications: notes?.medications || 'None prescribed',
         follow_up: 'As advised by doctor',
         status: 'completed',
         // Store live duration in minutes (supports decimals like 5.2)
@@ -118,6 +118,16 @@ const GeneratedNotes = () => {
     } finally {
       setIsRegenerating(false);
     }
+  };
+
+  const openVirtualSurgery = () => {
+    navigate('/virtual-coronary-planning', {
+      state: {
+        notes: generatedNotes,
+        transcript,
+        patientInfo,
+      },
+    });
   };
 
   return (
@@ -192,15 +202,27 @@ const GeneratedNotes = () => {
             </motion.button>
 
             {surgery.hasSurgery && (
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => navigate('/visualization')}
-                className="flex items-center space-x-2 px-5 py-3 bg-violet-600 text-white rounded-lg hover:bg-violet-700 font-medium transition-colors"
-              >
-                <Activity size={18} />
-                <span>Surgery Visualization</span>
-              </motion.button>
+              <>
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => navigate('/visualization')}
+                  className="flex items-center space-x-2 px-5 py-3 bg-violet-600 text-white rounded-lg hover:bg-violet-700 font-medium transition-colors"
+                >
+                  <Activity size={18} />
+                  <span>Surgery Visualization</span>
+                </motion.button>
+
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={openVirtualSurgery}
+                  className="flex items-center space-x-2 px-5 py-3 bg-rose-600 text-white rounded-lg hover:bg-rose-700 font-medium transition-colors"
+                >
+                  <Activity size={18} />
+                  <span>Virtual Surgery</span>
+                </motion.button>
+              </>
             )}
 
             {!saved && (

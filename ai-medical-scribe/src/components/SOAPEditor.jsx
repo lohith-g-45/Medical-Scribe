@@ -9,6 +9,7 @@ const SOAPEditor = ({ initialNotes, onSave, onRegenerate, isEditable = true }) =
     pastMedicalHistory: '',
     assessment: '',
     plan: '',
+    medications: '',
   });
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -19,6 +20,7 @@ const SOAPEditor = ({ initialNotes, onSave, onRegenerate, isEditable = true }) =
     { key: 'pastMedicalHistory', label: 'Past Medical History', rows: 4 },
     { key: 'assessment', label: 'Assessment', rows: 5 },
     { key: 'plan', label: 'Plan', rows: 5 },
+    { key: 'medications', label: 'Prescribed Medications', rows: 3 },
   ];
 
   useEffect(() => {
@@ -115,7 +117,9 @@ const SOAPEditor = ({ initialNotes, onSave, onRegenerate, isEditable = true }) =
               <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
                 <p className="text-gray-700 whitespace-pre-wrap">
                   {notes[section.key] || (
-                    <span className="text-gray-400">No data available</span>
+                    <span className="text-gray-400">
+                      {section.key === 'medications' ? 'None prescribed' : 'No data available'}
+                    </span>
                   )}
                 </p>
               </div>

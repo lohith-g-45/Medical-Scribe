@@ -6,7 +6,7 @@ import Header from '../components/layout/Header';
 import SOAPEditor from '../components/SOAPEditor';
 import Modal from '../components/Modal';
 import Loading from '../components/Loading';
-import { getPatientById, deletePatient, updatePatient } from '../services/api';
+import { getPatientById, deletePatient, updatePatient, updateConsultation, regenerateNotes } from '../services/api';
 import { generateConsultationPDF } from '../utils/pdfGenerator';
 import { formatDate } from '../utils/helpers';
 import { useToast } from '../components/Toast';
@@ -24,6 +24,8 @@ const PatientDetail = () => {
   const [isDeleting, setIsDeleting] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isUpdatingPrescription, setIsUpdatingPrescription] = useState(false);
+  const [isBulkUpdatingPrescriptions, setIsBulkUpdatingPrescriptions] = useState(false);
   const [editForm, setEditForm] = useState({});
 
   useEffect(() => {
@@ -61,6 +63,7 @@ const PatientDetail = () => {
         objective: c.objective || '',
         assessment: c.assessment || '',
         plan: c.plan || '',
+        medications: c.medications || '',
       }));
 
       // Consultations are sorted DESC (newest first); older visits sit at higher indices
@@ -79,11 +82,13 @@ const PatientDetail = () => {
           doctor: c.doctor,
           transcript: c.transcript,
           notes: {
-            chiefComplaint: c.subjective,
+            // Keep diagnosis/chief complaint context for legacy records where subjective may be empty.
+            chiefComplaint: c.subjective || c.chiefComplaint,
             historyOfPresentIllness: c.objective,
             pastMedicalHistory,
             assessment: c.assessment,
             plan: c.plan,
+            medications: c.medications || '',
           },
         };
       });
@@ -146,7 +151,35 @@ const PatientDetail = () => {
   };
 
   const handleView3D = (consultation) => {
+    if (!hasSurgery(consultation)) {
+      toast.warning('3D visualization is available only for heart-related surgical consultations.');
+      return;
+    }
+
     navigate('/visualization', {
+      state: {
+        notes: consultation.notes,
+        transcript: consultation.transcript,
+        patientInfo: {
+          patientName: patient.name,
+          age: patient.age,
+          gender: patient.gender,
+          phone: patient.phone,
+          email: patient.email,
+          address: patient.address,
+          dateOfVisit: consultation.date,
+        },
+      },
+    });
+  };
+
+  const handleVirtualSurgery = (consultation) => {
+    if (!hasSurgery(consultation)) {
+      toast.warning('Virtual surgery is available only for heart-related surgical consultations.');
+      return;
+    }
+
+    navigate('/virtual-coronary-planning', {
       state: {
         notes: consultation.notes,
         transcript: consultation.transcript,
@@ -165,6 +198,186 @@ const PatientDetail = () => {
 
   const hasSurgery = (consultation) =>
     detectSurgeryContext(consultation?.notes, consultation?.transcript).hasSurgery;
+
+  const handleAutoFillPrescription = async (consultation) => {
+    if (!consultation?.id) return;
+
+    if (!String(consultation?.transcript || '').trim()) {
+      toast.warning('Transcript is required to generate prescription draft.');
+      return;
+    }
+
+    setIsUpdatingPrescription(true);
+    try {
+      toast.info('Generating AI prescription draft from consultation...');
+      const newNotes = await regenerateNotes(consultation.transcript);
+      const medications = String(newNotes?.medications || '').trim() || 'None prescribed';
+
+      await updateConsultation(consultation.id, { medications });
+
+      setPatient((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          consultations: (prev.consultations || []).map((item) =>
+            item.id === consultation.id
+              ? {
+                  ...item,
+                  notes: {
+                    ...(item.notes || {}),
+                    medications,
+                  },
+                }
+              : item
+          ),
+        };
+      });
+
+      setSelectedConsultation((prev) => {
+        if (!prev || prev.id !== consultation.id) return prev;
+        return {
+          ...prev,
+          notes: {
+            ...(prev.notes || {}),
+            medications,
+          },
+        };
+      });
+
+      toast.success('Prescription draft updated in this patient record.');
+    } catch (error) {
+      toast.error(error?.message || error?.error || 'Failed to update prescription draft.');
+      console.error('Auto-fill prescription error:', error);
+    } finally {
+      setIsUpdatingPrescription(false);
+    }
+  };
+
+  const handleAutoFillAllPrescriptions = async () => {
+    const consultations = patient?.consultations || [];
+    if (!consultations.length) {
+      toast.warning('No consultations found for this patient.');
+      return;
+    }
+
+    setIsBulkUpdatingPrescriptions(true);
+    try {
+      let updated = 0;
+
+      for (const consultation of consultations) {
+        const transcript = String(consultation?.transcript || '').trim();
+        if (!transcript) continue;
+
+        const notes = consultation?.notes || {};
+        const existingMeds = String(notes.medications || '').trim();
+        if (existingMeds && existingMeds.toLowerCase() !== 'none prescribed') {
+          continue;
+        }
+
+        try {
+          const regenerated = await regenerateNotes(transcript);
+          const medications = String(regenerated?.medications || '').trim() || 'None prescribed';
+
+          await updateConsultation(consultation.id, { medications });
+          updated += 1;
+
+          setPatient((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              consultations: (prev.consultations || []).map((item) =>
+                item.id === consultation.id
+                  ? {
+                      ...item,
+                      notes: {
+                        ...(item.notes || {}),
+                        medications,
+                      },
+                    }
+                  : item
+              ),
+            };
+          });
+
+          setSelectedConsultation((prev) => {
+            if (!prev || prev.id !== consultation.id) return prev;
+            return {
+              ...prev,
+              notes: {
+                ...(prev.notes || {}),
+                medications,
+              },
+            };
+          });
+        } catch (err) {
+          console.warn('Bulk prescription update skipped for consultation', consultation.id, err);
+        }
+      }
+
+      if (updated > 0) {
+        toast.success(`Updated prescriptions for ${updated} consultation${updated > 1 ? 's' : ''}.`);
+      } else {
+        toast.info('No consultations needed prescription updates.');
+      }
+    } finally {
+      setIsBulkUpdatingPrescriptions(false);
+    }
+  };
+
+  const handleSaveConsultationNotes = async (editedNotes) => {
+    if (!selectedConsultation?.id) return;
+
+    const payload = {
+      subjective: editedNotes?.chiefComplaint || '',
+      objective: editedNotes?.historyOfPresentIllness || '',
+      assessment: editedNotes?.assessment || '',
+      plan: editedNotes?.plan || '',
+      medications: editedNotes?.medications || 'None prescribed',
+    };
+
+    await updateConsultation(selectedConsultation.id, payload);
+
+    setPatient((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        consultations: (prev.consultations || []).map((item) =>
+          item.id === selectedConsultation.id
+            ? {
+                ...item,
+                chiefComplaint: payload.subjective || item.chiefComplaint,
+                notes: {
+                  ...(item.notes || {}),
+                  chiefComplaint: payload.subjective,
+                  historyOfPresentIllness: payload.objective,
+                  assessment: payload.assessment,
+                  plan: payload.plan,
+                  medications: payload.medications,
+                },
+              }
+            : item
+        ),
+      };
+    });
+
+    setSelectedConsultation((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        chiefComplaint: payload.subjective || prev.chiefComplaint,
+        notes: {
+          ...(prev.notes || {}),
+          chiefComplaint: payload.subjective,
+          historyOfPresentIllness: payload.objective,
+          assessment: payload.assessment,
+          plan: payload.plan,
+          medications: payload.medications,
+        },
+      };
+    });
+
+    toast.success('Consultation notes updated.');
+  };
 
   const handleDownloadPDF = (consultation) => {
     generateConsultationPDF({
@@ -391,9 +604,18 @@ const PatientDetail = () => {
           {/* Consultation History */}
           <div className="lg:col-span-2">
             <div className="card">
-              <h2 className="text-xl font-bold text-gray-900 mb-6">
-                Consultation History ({patient.consultations.length})
-              </h2>
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+                  <h2 className="text-xl font-bold text-gray-900">
+                    Consultation History ({patient.consultations.length})
+                  </h2>
+                  <button
+                    onClick={handleAutoFillAllPrescriptions}
+                    disabled={isBulkUpdatingPrescriptions}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-lg transition-colors text-sm"
+                  >
+                    {isBulkUpdatingPrescriptions ? 'Updating All Prescriptions...' : 'Auto-fill All Prescriptions (AI)'}
+                  </button>
+                </div>
 
               <div className="space-y-4">
                 {patient.consultations.map((consultation, index) => (
@@ -450,13 +672,22 @@ const PatientDetail = () => {
                         <span>Download PDF</span>
                       </button>
                       {hasSurgery(consultation) && (
-                        <button
-                          onClick={() => handleView3D(consultation)}
-                          className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors text-sm"
-                        >
-                          <Activity size={15} />
-                          <span>Surgery Visualization</span>
-                        </button>
+                        <>
+                          <button
+                            onClick={() => handleView3D(consultation)}
+                            className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors text-sm"
+                          >
+                            <Activity size={15} />
+                            <span>3D Visualization</span>
+                          </button>
+                          <button
+                            onClick={() => handleVirtualSurgery(consultation)}
+                            className="flex items-center gap-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-colors text-sm"
+                          >
+                            <Activity size={15} />
+                            <span>Virtual Surgery</span>
+                          </button>
+                        </>
                       )}
                     </div>
                   </motion.div>
@@ -477,14 +708,30 @@ const PatientDetail = () => {
         {selectedConsultation && (
           <div className="space-y-6">
             <div className="flex justify-end gap-3">
+              <button
+                onClick={() => handleAutoFillPrescription(selectedConsultation)}
+                disabled={isUpdatingPrescription}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-lg transition-colors text-sm"
+              >
+                <span>{isUpdatingPrescription ? 'Updating Prescription...' : 'Auto-fill Prescription (AI)'}</span>
+              </button>
               {hasSurgery(selectedConsultation) && (
-                <button
-                  onClick={() => handleView3D(selectedConsultation)}
-                  className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors text-sm"
-                >
-                  <Activity size={15} />
-                  <span>Surgery Visualization</span>
-                </button>
+                <>
+                  <button
+                    onClick={() => handleView3D(selectedConsultation)}
+                    className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors text-sm"
+                  >
+                    <Activity size={15} />
+                    <span>3D Visualization</span>
+                  </button>
+                  <button
+                    onClick={() => handleVirtualSurgery(selectedConsultation)}
+                    className="flex items-center gap-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-colors text-sm"
+                  >
+                    <Activity size={15} />
+                    <span>Virtual Surgery</span>
+                  </button>
+                </>
               )}
               <button
                 onClick={() => handleDownloadPDF(selectedConsultation)}
@@ -514,7 +761,8 @@ const PatientDetail = () => {
                 </h3>
                 <SOAPEditor
                   initialNotes={selectedConsultation.notes}
-                  isEditable={false}
+                  onSave={handleSaveConsultationNotes}
+                  isEditable={true}
                 />
               </div>
             )}

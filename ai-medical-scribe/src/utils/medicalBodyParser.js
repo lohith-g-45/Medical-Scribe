@@ -30,42 +30,42 @@ const BODY_PART_KEYWORDS = {
 
 // 3D mesh IDs per body part
 const BODY_PART_TO_MESH = {
-  knee:     ['left_knee', 'right_knee', 'left_thigh', 'right_thigh', 'left_shin', 'right_shin'],
-  shoulder: ['left_shoulder', 'right_shoulder', 'left_upper_arm', 'right_upper_arm'],
-  elbow:    ['left_elbow', 'right_elbow', 'left_upper_arm', 'right_upper_arm', 'left_lower_arm', 'right_lower_arm'],
-  wrist:    ['left_wrist', 'right_wrist', 'left_lower_arm', 'right_lower_arm'],
-  hip:      ['left_hip', 'right_hip', 'pelvis'],
-  ankle:    ['left_ankle', 'right_ankle', 'left_shin', 'right_shin'],
-  back:     ['torso', 'abdomen', 'pelvis'],
-  neck:     ['neck'],
-  head:     ['head', 'brain'],
-  chest:    ['chest', 'left_lung', 'right_lung'],
-  abdomen:  ['abdomen', 'abdomen_organ'],
+  knee:     ['left_knee', 'right_knee'],
+  shoulder: ['lung', 'heart'],
+  elbow:    ['lung'],
+  wrist:    ['lung'],
+  hip:      ['pelvis'],
+  ankle:    ['pelvis'],
+  back:     ['spinal_cord', 'pelvis'],
+  neck:     ['larynx', 'trachea', 'main_bronchus'],
+  head:     ['brain', 'mouth'],
+  chest:    ['heart', 'lung', 'thymus', 'blood_vasculature'],
+  abdomen:  ['liver', 'pancreas', 'spleen', 'small_intestine', 'large_intestine', 'left_kidney', 'right_kidney', 'left_ureter', 'right_ureter', 'urinary_bladder'],
   pelvis:   ['pelvis'],
-  thigh:    ['left_thigh', 'right_thigh'],
-  calf:     ['left_shin', 'right_shin'],
-  foot:     ['left_foot', 'right_foot'],
-  hand:     ['left_hand', 'right_hand'],
+  thigh:    ['pelvis', 'left_knee', 'right_knee'],
+  calf:     ['left_knee', 'right_knee'],
+  foot:     ['pelvis'],
+  hand:     ['mouth'],
 };
 
 // Primary glow joint per body part
 const BODY_PART_PRIMARY_JOINT = {
   knee:     ['left_knee', 'right_knee'],
-  shoulder: ['left_shoulder', 'right_shoulder'],
-  elbow:    ['left_elbow', 'right_elbow'],
-  wrist:    ['left_wrist', 'right_wrist'],
-  hip:      ['left_hip', 'right_hip'],
-  ankle:    ['left_ankle', 'right_ankle'],
-  back:     ['torso'],
-  neck:     ['neck'],
-  head:     ['head'],
-  chest:    ['chest'],
-  abdomen:  ['abdomen'],
+  shoulder: ['lung'],
+  elbow:    ['lung'],
+  wrist:    ['lung'],
+  hip:      ['pelvis'],
+  ankle:    ['pelvis'],
+  back:     ['spinal_cord'],
+  neck:     ['trachea'],
+  head:     ['brain'],
+  chest:    ['heart'],
+  abdomen:  ['small_intestine'],
   pelvis:   ['pelvis'],
-  thigh:    ['left_thigh', 'right_thigh'],
-  calf:     ['left_shin', 'right_shin'],
-  foot:     ['left_foot', 'right_foot'],
-  hand:     ['left_hand', 'right_hand'],
+  thigh:    ['left_knee', 'right_knee'],
+  calf:     ['left_knee', 'right_knee'],
+  foot:     ['pelvis'],
+  hand:     ['mouth'],
 };
 
 // ── Severity keywords ──────────────────────────────────────────────────────
@@ -82,6 +82,93 @@ const TREATMENT_KEYWORDS = {
   physiotherapy: ['physiotherapy', 'physical therapy', 'rehabilitation', 'rehab', 'exercise therapy', 'strengthening exercises', 'stretching'],
   medication:    ['medication', 'anti-inflammatory', 'nsaid', 'ibuprofen', 'corticosteroid', 'injection', 'analgesic', 'prescribed', 'tablets', 'drugs'],
   rest:          ['rest', 'immobilize', 'immobilization', 'brace', 'splint', 'crutches', 'cast', 'bed rest'],
+};
+
+const SURGERY_KEYWORDS = [
+  'surgery',
+  'surgical',
+  'operation',
+  'operated',
+  'arthroscopy',
+  'arthroplasty',
+  'replacement',
+  'reconstruction',
+  'repair',
+  'procedure',
+  'implant',
+  'bypass',
+  'stent',
+  'graft',
+  'resection',
+];
+
+const MESH_KEYWORDS = {
+  brain: ['brain', 'cerebral', 'neuro'],
+  skull: ['skull', 'cranial', 'cranium'],
+  mouth: ['mouth', 'oral', 'jaw'],
+  larynx: ['larynx', 'voice box'],
+  trachea: ['trachea', 'windpipe'],
+  main_bronchus: ['bronchus', 'bronchial'],
+  heart: ['heart', 'cardiac', 'coronary', 'myocardial'],
+  lung: ['lung', 'pulmonary'],
+  lung_left: ['left lung', 'left pulmonary'],
+  lung_right: ['right lung', 'right pulmonary'],
+  thymus: ['thymus'],
+  blood_vasculature: ['blood vessel', 'vasculature', 'artery', 'vein', 'vascular'],
+  liver: ['liver', 'hepatic'],
+  pancreas: ['pancreas', 'pancreatic'],
+  spleen: ['spleen', 'splenic'],
+  small_intestine: ['small intestine', 'small bowel', 'ileum', 'jejunum', 'duodenum'],
+  large_intestine: ['large intestine', 'colon', 'colorectal'],
+  left_kidney: ['left kidney', 'left renal'],
+  right_kidney: ['right kidney', 'right renal'],
+  left_ureter: ['left ureter'],
+  right_ureter: ['right ureter'],
+  urinary_bladder: ['bladder', 'urinary bladder', 'vesical'],
+  pelvis: ['pelvis', 'pelvic'],
+  pelvis_left: ['left pelvis', 'left pelvic'],
+  pelvis_right: ['right pelvis', 'right pelvic'],
+  spinal_cord: ['spinal cord', 'cord compression'],
+  spine_thoracic: ['thoracic spine', 'thoracic vertebra'],
+  vertebra_lumbar: ['lumbar spine', 'lumbar vertebra', 'l spine'],
+  left_knee: ['left knee', 'left patella', 'left acl', 'left mcl', 'left pcl', 'left meniscus'],
+  right_knee: ['right knee', 'right patella', 'right acl', 'right mcl', 'right pcl', 'right meniscus'],
+  lymph_node: ['lymph node', 'lymphatic'],
+  femur_left: ['left femur', 'left thigh bone'],
+  femur_right: ['right femur', 'right thigh bone'],
+  femur_head_left: ['left femoral head'],
+  femur_head_right: ['right femoral head'],
+  tibia_left: ['left tibia', 'left shin bone'],
+  tibia_right: ['right tibia', 'right shin bone'],
+  humerus_left: ['left humerus', 'left upper arm bone'],
+  humerus_right: ['right humerus', 'right upper arm bone'],
+  radius_left: ['left radius', 'left forearm bone'],
+  radius_right: ['right radius', 'right forearm bone'],
+  scapula_left: ['left scapula', 'left shoulder blade'],
+  scapula_right: ['right scapula', 'right shoulder blade'],
+  skin: ['skin', 'cutaneous'],
+  body_skin: ['skin', 'body skin', 'cutaneous'],
+};
+
+const KNEE_SUBPART_KEYWORDS = {
+  acl: ['acl', 'anterior cruciate', 'anterior cruciate ligament'],
+  pcl: ['pcl', 'posterior cruciate', 'posterior cruciate ligament'],
+  mcl: ['mcl', 'medial collateral', 'medial collateral ligament'],
+  lcl: ['lcl', 'lateral collateral', 'lateral collateral ligament'],
+  meniscus: ['meniscus', 'medial meniscus', 'lateral meniscus', 'meniscal'],
+  patella: ['patella', 'kneecap'],
+  patellar_tendon: ['patellar tendon', 'quadriceps tendon', 'tendon'],
+};
+
+const KNEE_SUBPART_LABEL = {
+  acl: 'ACL Region',
+  pcl: 'PCL Region',
+  mcl: 'MCL Region',
+  lcl: 'LCL Region',
+  meniscus: 'Meniscus Region',
+  patella: 'Patella Region',
+  patellar_tendon: 'Patellar Tendon Region',
+  generic: 'Knee Injury Region',
 };
 
 // ── Full display metadata for every body part ──────────────────────────────
@@ -355,6 +442,65 @@ export function parseBodyCondition(notes = {}, transcript = '') {
   }
 
   const laterality = hasLeft && !hasRight ? 'Left' : hasRight && !hasLeft ? 'Right' : '';
+
+  const isSurgicalCase = SURGERY_KEYWORDS.some((kw) => allText.includes(kw));
+
+  const meshScores = [];
+  for (const [meshId, keywords] of Object.entries(MESH_KEYWORDS)) {
+    let score = 0;
+    for (const kw of keywords) score += countOccurrences(allText, kw);
+    if (score > 0) meshScores.push({ meshId, score });
+  }
+
+  meshScores.sort((a, b) => b.score - a.score);
+
+  const meshLateralityPass = (meshId) => {
+    if (laterality === 'Left' && meshId.startsWith('right_')) return false;
+    if (laterality === 'Right' && meshId.startsWith('left_')) return false;
+    return true;
+  };
+
+  const candidateFocusMeshes = meshScores
+    .map((m) => m.meshId)
+    .filter(meshLateralityPass);
+
+  let focusMeshes = [];
+  if (isSurgicalCase && candidateFocusMeshes.length > 0) {
+    const top = candidateFocusMeshes[0];
+    if (laterality) {
+      focusMeshes = [top];
+    } else if (top === 'left_knee' || top === 'right_knee') {
+      focusMeshes = ['left_knee', 'right_knee'];
+    } else {
+      focusMeshes = [top];
+    }
+  }
+
+  // ── 6. Knee-specific sub-part detection ─────────────────────────────────
+  let kneeSubpart = null;
+  if (detectedPart === 'knee') {
+    let maxSubpartScore = 0;
+    for (const [subpart, keywords] of Object.entries(KNEE_SUBPART_KEYWORDS)) {
+      let score = 0;
+      for (const kw of keywords) score += countOccurrences(allText, kw);
+      if (score > maxSubpartScore) {
+        maxSubpartScore = score;
+        kneeSubpart = subpart;
+      }
+    }
+
+    if (!kneeSubpart && (allText.includes('medial') || allText.includes('inner knee'))) {
+      kneeSubpart = 'mcl';
+    } else if (!kneeSubpart && (allText.includes('lateral') || allText.includes('outer knee'))) {
+      kneeSubpart = 'lcl';
+    } else if (!kneeSubpart && allText.includes('anterior')) {
+      kneeSubpart = 'acl';
+    } else if (!kneeSubpart && allText.includes('posterior')) {
+      kneeSubpart = 'pcl';
+    }
+  }
+
+  const focusMode = detectedPart === 'knee' ? 'knee' : 'full';
   const display = CONDITION_DISPLAY[detectedPart] || {
     name: detectedPart.charAt(0).toUpperCase() + detectedPart.slice(1) + ' Condition',
     icon: '🏥',
@@ -373,6 +519,12 @@ export function parseBodyCondition(notes = {}, transcript = '') {
     beforeDescription: display.beforeDesc(severityLevel),
     afterDescription: display.afterDesc(treatmentType),
     laterality,
+    isSurgicalCase,
+    focusMeshes,
+    focusOnly: focusMeshes.length > 0,
+    focusMode,
+    kneeSubpart,
+    kneeSubpartLabel: kneeSubpart ? (KNEE_SUBPART_LABEL[kneeSubpart] || KNEE_SUBPART_LABEL.generic) : '',
   };
 }
 
