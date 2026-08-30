@@ -14,6 +14,15 @@ sentencepiece==0.1.99
 spacy>=3.6.1,<3.7.0
 https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.3/en_core_sci_sm-0.5.3.tar.gz
 
+# Voice-based speaker identification (doctor voiceprint enrollment/matching)
+resemblyzer>=0.1.4
+librosa>=0.10.0
+# webrtcvad needs a C compiler; the plain package builds fine on Linux (Render) but not on
+# Windows without MSVC Build Tools — use the prebuilt-wheel fork there instead. Both provide
+# the same importable `webrtcvad` module name.
+webrtcvad>=2.0.10; sys_platform != "win32"
+webrtcvad-wheels>=2.0.14; sys_platform == "win32"
+
 # LLM
 groq==0.4.2
 

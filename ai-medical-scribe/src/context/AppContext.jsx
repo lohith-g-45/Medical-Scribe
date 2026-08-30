@@ -14,6 +14,9 @@ export const AppProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [transcript, setTranscript] = useState('');
   const [utterances, setUtterances] = useState([]); // structured diarization: [{speaker, text, start, end}]
+  // Full dual-language per-utterance records from /api/diarize — original spoken-language
+  // text + English translation per utterance, saved alongside the consultation.
+  const [dualLanguageUtterances, setDualLanguageUtterances] = useState([]);
   const [generatedNotes, setGeneratedNotes] = useState(null);
   const [consultationData, setConsultationData] = useState(null);
   const [darkMode, setDarkMode] = useState(false);
@@ -71,6 +74,7 @@ export const AppProvider = ({ children }) => {
   const clearConsultation = () => {
     setTranscript('');
     setUtterances([]);
+    setDualLanguageUtterances([]);
     setGeneratedNotes(null);
     setConsultationData(null);
     setIsRecording(false);
@@ -87,6 +91,8 @@ export const AppProvider = ({ children }) => {
     setTranscript,
     utterances,
     setUtterances,
+    dualLanguageUtterances,
+    setDualLanguageUtterances,
     generatedNotes,
     setGeneratedNotes,
     consultationData,

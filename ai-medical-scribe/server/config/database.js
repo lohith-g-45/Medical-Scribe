@@ -2,12 +2,9 @@ const mysql = require('mysql2');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
 
-console.log('📝 Database Configuration:');
-console.log('  Host:', process.env.DB_HOST);
-console.log('  User:', process.env.DB_USER);
-console.log('  Database:', process.env.DB_NAME);
-console.log('  Port:', process.env.DB_PORT);
-console.log('  Password:', process.env.DB_PASSWORD ? '***' + process.env.DB_PASSWORD.slice(-2) : 'EMPTY!');
+console.log(`📝 Database config loaded for ${process.env.DB_NAME || 'medical_scribe_db'} (host hidden)`);
+
+const sslEnabled = String(process.env.DB_SSL || '').trim().toLowerCase() === 'true';
 
 // Create MySQL connection pool
 const pool = mysql.createPool({
@@ -20,7 +17,8 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   enableKeepAlive: true,
-  keepAliveInitialDelay: 0
+  keepAliveInitialDelay: 0,
+  ...(sslEnabled ? { ssl: { rejectUnauthorized: true } } : {}),
 });
 
 // Test database connection

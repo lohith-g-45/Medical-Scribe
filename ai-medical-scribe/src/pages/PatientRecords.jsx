@@ -43,20 +43,23 @@ const PatientRecords = () => {
         return acc;
       }, {});
 
-      const mappedPatients = patientsList.map((p) => {
-        const patientConsultations = consultationsByPatient[String(p.id)] || [];
-        const latest = patientConsultations[0] || null;
+      const mappedPatients = patientsList
+        .map((p) => {
+          const patientConsultations = consultationsByPatient[String(p.id)] || [];
+          const latest = patientConsultations[0] || null;
+          const lastVisit = latest?.visit_date || p.updated_at || p.created_at || new Date().toISOString();
 
-        return {
-          id: p.id,
-          name: p.patient_name,
-          age: p.age,
-          gender: p.gender,
-          lastVisit: latest?.visit_date || p.updated_at || p.created_at,
-          diagnosis: latest?.diagnosis || 'No diagnosis recorded',
-          consultations: patientConsultations.length,
-        };
-      });
+          return {
+            id: p.id,
+            name: p.patient_name,
+            age: p.age,
+            gender: p.gender,
+            lastVisit: lastVisit,
+            diagnosis: latest?.diagnosis || 'No diagnosis recorded',
+            consultations: patientConsultations.length,
+          };
+        })
+        .sort((a, b) => Number(a.id) - Number(b.id));
 
       setPatients(mappedPatients);
       setFilteredPatients(mappedPatients);
@@ -70,7 +73,7 @@ const PatientRecords = () => {
   };
 
   const filterPatients = () => {
-    let filtered = [...patients];
+    let filtered = [...patients].sort((a, b) => Number(a.id) - Number(b.id));
 
     // Search filter
     if (searchQuery) {

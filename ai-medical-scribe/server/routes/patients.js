@@ -50,7 +50,7 @@ async function getLastConsultationShort(patientId, doctorId) {
   const [rows] = await db.query(
     `SELECT id, visit_date, created_at, diagnosis, assessment, plan
      FROM consultations
-     WHERE patient_id = ? AND doctor_id = ?
+     WHERE patient_id = ? AND doctor_id = ? AND deleted_at IS NULL
      ORDER BY visit_date DESC, id DESC
      LIMIT 1`,
     [patientId, doctorId]
@@ -71,7 +71,7 @@ router.get('/', async (req, res) => {
       `SELECT DISTINCT p.*
        FROM patients p
        INNER JOIN consultations c ON c.patient_id = p.id
-       WHERE c.doctor_id = ?
+       WHERE c.doctor_id = ? AND p.deleted_at IS NULL
        ORDER BY p.created_at DESC`,
       [doctorId]
     );
@@ -117,7 +117,7 @@ router.get('/resolve', async (req, res) => {
         `SELECT p.*
          FROM patients p
          INNER JOIN consultations c ON c.patient_id = p.id
-         WHERE p.id = ? AND c.doctor_id = ?
+         WHERE p.id = ? AND c.doctor_id = ? AND p.deleted_at IS NULL
          LIMIT 1`,
         [parseInt(patient_id, 10), doctorId]
       );
@@ -169,7 +169,7 @@ router.get('/resolve', async (req, res) => {
       `SELECT DISTINCT p.*
        FROM patients p
        INNER JOIN consultations c ON c.patient_id = p.id
-       WHERE c.doctor_id = ? AND (${whereSql})
+       WHERE c.doctor_id = ? AND p.deleted_at IS NULL AND (${whereSql})
        ORDER BY p.id DESC
        LIMIT 20`,
       [doctorId, ...params]
@@ -220,7 +220,7 @@ router.get('/:id', async (req, res) => {
       `SELECT DISTINCT p.*
        FROM patients p
        INNER JOIN consultations c ON c.patient_id = p.id
-       WHERE p.id = ? AND c.doctor_id = ?`,
+       WHERE p.id = ? AND c.doctor_id = ? AND p.deleted_at IS NULL`,
       [id, doctorId]
     );
 
@@ -263,14 +263,15 @@ router.get('/search/:query', async (req, res) => {
       `SELECT DISTINCT p.id, p.patient_name, p.age, p.gender, p.phone, p.email
        FROM patients p
        INNER JOIN consultations c ON c.patient_id = p.id
-       WHERE c.doctor_id = ?
-       ORDER BY p.patient_name ASC`,
+       WHERE c.doctor_id = ? AND p.deleted_at IS NULL`,
       [doctorId]
     );
 
     const normalizedQuery = String(query || '').trim().toLowerCase();
     const normalizedDigits = normalizePhone(query);
 
+    // patient_name is encrypted at rest (random IV per value), so ordering/filtering
+    // by it must happen in JS after decrypt — a SQL-level ORDER BY on ciphertext is meaningless.
     const patients = patientsRaw
       .map((row) => decryptPatientFields(row))
       .map((row) => sanitizePatientOutput(row))
@@ -278,6 +279,7 @@ router.get('/search/:query', async (req, res) => {
         String(row.patient_name || '').toLowerCase().includes(normalizedQuery) ||
         (normalizedDigits && normalizePhone(row.phone).includes(normalizedDigits))
       )
+      .sort((a, b) => String(a.patient_name || '').localeCompare(String(b.patient_name || '')))
       .slice(0, 20);
 
     res.json({
@@ -311,6 +313,7 @@ router.post('/', async (req, res) => {
     }
 
     const encrypted = encryptPatientFields({
+      patient_name,
       age,
       gender,
       phone,
@@ -327,7 +330,7 @@ router.post('/', async (req, res) => {
        (patient_name, age, gender, phone, email, address, medical_history, allergies, blood_group, phone_hash, email_hash)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        patient_name,
+        encrypted.patient_name,
         encrypted.age,
         encrypted.gender,
         encrypted.phone,
@@ -352,32 +355,67 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Fields a doctor is allowed to edit on a patient record. Anything else in the request
+// body is ignored rather than silently written to a dynamically-built SQL SET clause.
+const PATIENT_EDITABLE_FIELDS = [
+  'patient_name', 'age', 'gender', 'phone', 'email', 'address',
+  'medical_history', 'allergies', 'blood_group',
+];
+
+function validatePatientUpdate(updates) {
+  const errors = {};
+
+  if ('patient_name' in updates && !String(updates.patient_name || '').trim()) {
+    errors.patient_name = 'Patient name cannot be empty';
+  }
+  if ('age' in updates) {
+    const age = Number(updates.age);
+    if (!Number.isFinite(age) || age < 0 || age > 150) {
+      errors.age = 'Age must be a number between 0 and 150';
+    }
+  }
+  if ('gender' in updates && !String(updates.gender || '').trim()) {
+    errors.gender = 'Gender cannot be empty';
+  }
+  if ('email' in updates && updates.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(updates.email))) {
+    errors.email = 'Email format is invalid';
+  }
+  if ('phone' in updates && updates.phone && String(updates.phone).replace(/\D/g, '').length < 7) {
+    errors.phone = 'Phone number is too short';
+  }
+
+  return errors;
+}
+
 // Update patient
 router.put('/:id', async (req, res) => {
   try {
     const doctorId = req.user.id;
     const { id } = req.params;
-    const updates = { ...req.body };
 
-    delete updates.id;
-    delete updates.created_at;
-    delete updates.updated_at;
-    delete updates.phone_hash;
-    delete updates.email_hash;
+    const updates = {};
+    for (const field of PATIENT_EDITABLE_FIELDS) {
+      if (field in req.body) updates[field] = req.body[field];
+    }
+
+    const validationErrors = validatePatientUpdate(updates);
+    if (Object.keys(validationErrors).length > 0) {
+      return res.status(400).json({ error: 'Invalid patient data', fields: validationErrors });
+    }
 
     // Check if patient exists
     const [existing] = await db.query(
       `SELECT DISTINCT p.id
        FROM patients p
        INNER JOIN consultations c ON c.patient_id = p.id
-       WHERE p.id = ? AND c.doctor_id = ?`,
+       WHERE p.id = ? AND c.doctor_id = ? AND p.deleted_at IS NULL`,
       [id, doctorId]
     );
     if (existing.length === 0) {
       return res.status(404).json({ error: 'Patient not found' });
     }
 
-    // Build update query dynamically
+    // Build update query dynamically (from the allow-listed set above only)
     const encryptedUpdates = encryptPatientFields(updates);
     const lookupHashes = buildPatientLookupHashes(updates);
 
@@ -410,17 +448,17 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Delete patient
+// Delete patient (soft delete — clinical records are preserved, not destroyed)
 router.delete('/:id', async (req, res) => {
   try {
     const doctorId = req.user.id;
     const { id } = req.params;
 
     const [result] = await db.query(
-      `DELETE p
-       FROM patients p
+      `UPDATE patients p
        INNER JOIN consultations c ON c.patient_id = p.id
-       WHERE p.id = ? AND c.doctor_id = ?`,
+       SET p.deleted_at = NOW()
+       WHERE p.id = ? AND c.doctor_id = ? AND p.deleted_at IS NULL`,
       [id, doctorId]
     );
 

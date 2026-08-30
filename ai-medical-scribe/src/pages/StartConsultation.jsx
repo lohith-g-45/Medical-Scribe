@@ -59,6 +59,7 @@ const StartConsultation = () => {
     setTranscript,
     utterances,
     setUtterances,
+    setDualLanguageUtterances,
     isRecording,
     setIsRecording,
     setGeneratedNotes,
@@ -511,6 +512,7 @@ const StartConsultation = () => {
   const handleStartRecording = async () => {
     setTranscript('');
     setUtterances([]);
+    setDualLanguageUtterances([]);
     setLiveUtterances([]);
     setAudioBlob(null);
     setHasRecorded(false);
@@ -629,13 +631,15 @@ const StartConsultation = () => {
         setIsDiarizing(true);
         try {
           const result = await diarizeAudio(blob, consultationLangRef.current);
-          const hasTwoSpeakers = Boolean(result?.reliableTwoSpeaker) || (result?.diarizationMode === 'assemblyai' && (result?.speakerCount ?? 0) >= 2);
+          const hasTwoSpeakers = Boolean(result?.reliableTwoSpeaker);
 
           if (hasTwoSpeakers && result?.fullText?.trim()) {
-            // AssemblyAI successfully found Doctor + Patient — use it
+            // Doctor + Patient correctly identified (by voice match, or text heuristic as fallback)
             setTranscript(result.fullText.trim());
             setUtterances(result.utterances || []);
-            toast.success('Speaker diarization complete — Doctor and Patient voices identified.');
+            setDualLanguageUtterances(result.dualLanguageUtterances || []);
+            const via = result?.voiceIdUsed ? 'voice match' : 'conversation content';
+            toast.success(`Speaker diarization complete — Doctor and Patient identified by ${via}.`);
             return;
           }
 
@@ -645,6 +649,7 @@ const StartConsultation = () => {
             toast.warning(`Diarization returned ${mode}. Keeping your live preview transcript.`);
             // Still save utterances for context but do NOT overwrite transcript
             setUtterances(result.utterances || []);
+            setDualLanguageUtterances(result.dualLanguageUtterances || []);
             return;
           }
 
@@ -762,6 +767,9 @@ const StartConsultation = () => {
         assessment: soap.assessment || '',
         plan: soap.plan || '',
         medications: soap.medications || 'None prescribed',
+        // Only populated by the offline local fallback today — never blended into
+        // `medications` above, since it was never actually said in the consultation.
+        medicationsAiSuggested: soap.medications_suggested || '',
       };
 
       // If patient was in local-only mode, save them to DB now before navigating

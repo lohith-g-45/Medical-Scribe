@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { User, Building, Bell, Lock, Save } from 'lucide-react';
+import { User, Building, Bell, Lock, Save, Mic } from 'lucide-react';
 import Header from '../components/layout/Header';
 import { useAppContext } from '../context/AppContext';
 import { updateUserProfile, updateUserSettings } from '../services/api';
 import { useToast } from '../components/Toast';
+import VoiceEnrollment from '../components/VoiceEnrollment';
 
 const Settings = () => {
   const { user, setUser } = useAppContext();
@@ -268,6 +269,18 @@ const Settings = () => {
               </motion.button>
             </div>
           </motion.div>
+
+          {/* Voice Enrollment */}
+          <div className="card shadow-none hover:shadow-none">
+            <div className="flex items-center space-x-3 mb-6">
+              <Mic className="text-primary" size={24} />
+              <h2 className="text-xl font-bold text-gray-900">
+                Voice Enrollment
+              </h2>
+            </div>
+
+            <VoiceEnrollment />
+          </div>
 
           {/* Security Settings */}
           <motion.div

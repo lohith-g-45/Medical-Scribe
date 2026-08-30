@@ -1,6 +1,6 @@
 import { motion } from 'framer-motion';
 import { Eye, Calendar } from 'lucide-react';
-import { formatDate } from '../utils/helpers';
+import { formatDate, formatTime } from '../utils/helpers';
 
 const PatientTable = ({ patients, onViewPatient }) => {
 
@@ -66,7 +66,10 @@ const PatientTable = ({ patients, onViewPatient }) => {
                 <td className="px-6 py-4 whitespace-nowrap">
                   <div className="flex items-center text-sm text-gray-900">
                     <Calendar size={14} className="mr-2 text-gray-400" />
-                    {formatDate(patient.lastVisit)}
+                    <span>
+                      {formatDate(patient.lastVisit)}
+                      <span className="text-gray-500 ml-2">{formatTime(patient.lastVisit)}</span>
+                    </span>
                   </div>
                 </td>
                 <td className="px-6 py-4">

@@ -5,7 +5,42 @@ const {
   encryptConsultationFields,
   decryptConsultationFields,
   decryptPatientFields,
+  encryptUtteranceFields,
+  decryptUtteranceFields,
 } = require('../utils/fieldEncryption');
+
+// Persist the dual-language per-utterance transcript rows produced by /api/diarize.
+// `utterances` items are expected in the shape returned as `dualLanguageUtterances` there.
+async function saveConsultationUtterances(consultationId, utterances = []) {
+  if (!Array.isArray(utterances) || !utterances.length) return;
+
+  for (const u of utterances) {
+    const encrypted = encryptUtteranceFields({
+      original_text: u.originalText || '',
+      english_text: u.englishText || '',
+    });
+
+    await db.query(
+      `INSERT INTO consultation_utterances
+       (consultation_id, sequence_no, speaker_role, raw_speaker_label, start_ms, end_ms,
+        source_language_code, source_language_confidence, original_text, english_text, speaker_match_confidence)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        consultationId,
+        u.sequenceNo,
+        ['doctor', 'patient'].includes(u.speakerRole) ? u.speakerRole : 'unknown',
+        u.rawSpeakerLabel || null,
+        u.startMs ?? null,
+        u.endMs ?? null,
+        u.sourceLanguageCode || 'en',
+        u.sourceLanguageConfidence ?? null,
+        encrypted.original_text,
+        encrypted.english_text,
+        u.speakerMatchConfidence ?? null,
+      ]
+    );
+  }
+}
 
 const AI_SUGGESTION_PREFIX = /^\s*ai\s*suggestion\s*\(\s*doctor\s*review\s*required\s*\)\s*:\s*/i;
 
@@ -32,7 +67,7 @@ router.get('/', async (req, res) => {
       FROM consultations c
       LEFT JOIN patients p ON c.patient_id = p.id
       LEFT JOIN users u ON c.doctor_id = u.id
-      WHERE c.doctor_id = ?
+      WHERE c.doctor_id = ? AND c.deleted_at IS NULL
     `;
     let params = [doctorId];
 
@@ -60,6 +95,34 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Get per-utterance dual-language transcript rows for a consultation
+router.get('/:id/utterances', async (req, res) => {
+  try {
+    const doctorId = req.user.id;
+    const { id } = req.params;
+
+    const [owned] = await db.query(
+      'SELECT id FROM consultations WHERE id = ? AND doctor_id = ? AND deleted_at IS NULL',
+      [id, doctorId]
+    );
+    if (!owned.length) {
+      return res.status(404).json({ error: 'Consultation not found' });
+    }
+
+    const [rows] = await db.query(
+      `SELECT * FROM consultation_utterances WHERE consultation_id = ? ORDER BY sequence_no ASC`,
+      [id]
+    );
+
+    const utterances = rows.map((row) => decryptUtteranceFields(row));
+
+    res.json({ success: true, utterances });
+  } catch (error) {
+    console.error('Get consultation utterances error:', error);
+    res.status(500).json({ error: 'Error fetching consultation utterances' });
+  }
+});
+
 // Get consultation by ID
 router.get('/:id', async (req, res) => {
   try {
@@ -67,12 +130,12 @@ router.get('/:id', async (req, res) => {
     const { id } = req.params;
 
     const [consultationsRaw] = await db.query(
-      `SELECT c.*, p.patient_name, p.age, p.gender, p.phone, p.email, 
+      `SELECT c.*, p.patient_name, p.age, p.gender, p.phone, p.email,
               u.name as doctor_name, u.specialization
        FROM consultations c
        LEFT JOIN patients p ON c.patient_id = p.id
        LEFT JOIN users u ON c.doctor_id = u.id
-       WHERE c.id = ? AND c.doctor_id = ?`,
+       WHERE c.id = ? AND c.doctor_id = ? AND c.deleted_at IS NULL`,
       [id, doctorId]
     );
 
@@ -115,9 +178,11 @@ router.post('/', async (req, res) => {
       plan,
       diagnosis,
       medications,
+      medications_ai_suggested,
       follow_up,
       status = 'completed',
-      duration
+      duration,
+      utterances,
     } = req.body;
 
     const encrypted = encryptConsultationFields({
@@ -128,6 +193,7 @@ router.post('/', async (req, res) => {
       plan,
       diagnosis,
       medications: sanitizeMedicationsText(medications),
+      medications_ai_suggested: medications_ai_suggested || null,
       follow_up,
     });
 
@@ -163,10 +229,10 @@ router.post('/', async (req, res) => {
 
     // Insert consultation
     const [result] = await db.query(
-      `INSERT INTO consultations 
-       (patient_id, doctor_id, visit_date, transcript, subjective, objective, 
-        assessment, plan, diagnosis, medications, follow_up, status, duration)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO consultations
+       (patient_id, doctor_id, visit_date, transcript, subjective, objective,
+        assessment, plan, diagnosis, medications, medications_ai_suggested, follow_up, status, duration)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         patient_id, doctorId, visit_date,
         encrypted.transcript,
@@ -176,11 +242,20 @@ router.post('/', async (req, res) => {
         encrypted.plan,
         encrypted.diagnosis,
         encrypted.medications,
+        encrypted.medications_ai_suggested,
         encrypted.follow_up,
         status,
         duration
       ]
     );
+
+    try {
+      await saveConsultationUtterances(result.insertId, utterances);
+    } catch (utteranceErr) {
+      // The consultation itself saved fine — don't fail the whole request over the
+      // supplementary per-utterance dual-language rows.
+      console.error('Failed to save consultation utterances:', utteranceErr.message);
+    }
 
     res.status(201).json({
       success: true,
@@ -193,20 +268,28 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Fields a doctor is allowed to edit on a consultation. Anything else in the request
+// body is ignored rather than silently written to a dynamically-built SQL SET clause.
+const CONSULTATION_EDITABLE_FIELDS = [
+  'visit_date', 'transcript', 'subjective', 'objective', 'assessment', 'plan',
+  'diagnosis', 'medications', 'medications_ai_suggested', 'medications_ai_suggested_confirmed',
+  'follow_up', 'status', 'duration',
+];
+
 // Update consultation
 router.put('/:id', async (req, res) => {
   try {
     const doctorId = req.user.id;
     const { id } = req.params;
-    const updates = req.body;
 
-    if ('doctor_id' in updates) {
-      delete updates.doctor_id;
+    const updates = {};
+    for (const field of CONSULTATION_EDITABLE_FIELDS) {
+      if (field in req.body) updates[field] = req.body[field];
     }
 
     // Check if consultation exists
     const [existing] = await db.query(
-      'SELECT id FROM consultations WHERE id = ? AND doctor_id = ?',
+      'SELECT id FROM consultations WHERE id = ? AND doctor_id = ? AND deleted_at IS NULL',
       [id, doctorId]
     );
     if (existing.length === 0) {
@@ -247,14 +330,14 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Delete consultation
+// Delete consultation (soft delete — clinical records are preserved, not destroyed)
 router.delete('/:id', async (req, res) => {
   try {
     const doctorId = req.user.id;
     const { id } = req.params;
 
     const [result] = await db.query(
-      'DELETE FROM consultations WHERE id = ? AND doctor_id = ?',
+      'UPDATE consultations SET deleted_at = NOW() WHERE id = ? AND doctor_id = ? AND deleted_at IS NULL',
       [id, doctorId]
     );
 
@@ -283,7 +366,7 @@ router.get('/patient/:patient_id/history', async (req, res) => {
               u.name as doctor_name, u.specialization
        FROM consultations c
        LEFT JOIN users u ON c.doctor_id = u.id
-       WHERE c.patient_id = ? AND c.doctor_id = ?
+       WHERE c.patient_id = ? AND c.doctor_id = ? AND c.deleted_at IS NULL
        ORDER BY c.visit_date DESC`,
       [patient_id, doctorId]
     );

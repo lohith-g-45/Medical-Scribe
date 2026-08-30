@@ -287,10 +287,12 @@ export const diarizeAudio = (audioBlob, lang = 'en') => {
   });
 };
 
-// Local SOAP note generator used as fallback when AI backend is unavailable
+// Local SOAP note generator used as fallback when AI backend is unavailable.
+// This produces AI SUGGESTIONS only — never blended into the grounded `medications`
+// field, so a doctor can't mistake a guess for something actually said in the transcript.
 const suggestLocalMedications = (text) => {
   const lower = String(text || '').toLowerCase();
-  if (!lower) return 'None prescribed';
+  if (!lower) return '';
 
   const suggestions = [];
   const add = (item) => {
@@ -336,8 +338,30 @@ const suggestLocalMedications = (text) => {
     add('Tamsulosin 0.4 mg once daily (doctor discretion based on stone profile)');
   }
 
-  if (!suggestions.length) return 'None prescribed';
+  if (!suggestions.length) return '';
   return suggestions.slice(0, 3).join('; ');
+};
+
+// Grounded extraction only — pulls medication mentions that are literally present in the
+// transcript text (drug name + surrounding dose/form context), no inference.
+const extractLocalMedicationsFromTranscript = (text) => {
+  const source = String(text || '');
+  if (!source) return '';
+
+  const dosagePattern = /\b(?:paracetamol|acetaminophen|ibuprofen|aspirin|metformin|atorvastatin|amoxicillin|azithromycin|cetirizine|omeprazole|amlodipine|clopidogrel)\b[^.\n,;]{0,80}/gi;
+  const formsPattern = /\b(?:tablet|tab|capsule|cap|syrup|injection|inj\.?|ointment|cream|drops?)\b[^.\n]{0,100}/gi;
+
+  const byName = source.match(dosagePattern) || [];
+  const byForm = source.match(formsPattern) || [];
+  const merged = [...byName, ...byForm].map((v) => v.replace(/\s+/g, ' ').trim()).filter(Boolean);
+
+  const deduped = [];
+  for (const item of merged) {
+    if (!deduped.some((existing) => existing.toLowerCase() === item.toLowerCase())) {
+      deduped.push(item);
+    }
+  }
+  return deduped.slice(0, 4).join('; ');
 };
 
 const generateNotesLocally = (transcriptText, patientInfo = {}) => {
@@ -380,8 +404,9 @@ const generateNotesLocally = (transcriptText, patientInfo = {}) => {
     doctorLines.slice(-1)[0] ||
     'Treatment plan to be determined.';
 
-  const medicationsLine = suggestLocalMedications([chiefComplaintLine, history, assessmentLine, planLine, transcriptText].join(' '));
-
+  const combinedText = [chiefComplaintLine, history, assessmentLine, planLine, transcriptText].join(' ');
+  const groundedMedications = extractLocalMedicationsFromTranscript(transcriptText);
+  const suggestedMedications = groundedMedications ? '' : suggestLocalMedications(combinedText);
 
   return {
     transcript: transcriptText,
@@ -390,7 +415,8 @@ const generateNotesLocally = (transcriptText, patientInfo = {}) => {
       history: history,
       assessment: assessmentLine,
       plan: planLine,
-      medications: medicationsLine,
+      medications: groundedMedications || 'None prescribed',
+      medications_suggested: suggestedMedications,
     },
     source: 'local',
   };
@@ -449,7 +475,22 @@ export const regenerateNotes = async (transcript) => {
     assessment: result?.soap_notes?.assessment || '',
     plan: result?.soap_notes?.plan || '',
     medications: result?.soap_notes?.medications || '',
+    medicationsAiSuggested: result?.soap_notes?.medications_suggested || '',
   };
+};
+
+// Explicit, opt-in AI medication suggestions — kept separate from the transcript-grounded
+// `medications` field. Only call this when the doctor asks for suggestions.
+export const suggestMedications = async (transcript, soapNotes = {}) => {
+  try {
+    const response = await api.post('/notes/suggest-medications', {
+      transcript,
+      soap_notes: soapNotes,
+    });
+    return response.data?.medications_suggested || '';
+  } catch (error) {
+    throw error.response?.data || { message: 'Failed to suggest medications' };
+  }
 };
 
 export const updateNotes = async (noteId, updatedData) => {
@@ -565,20 +606,18 @@ export const getRecentConsultations = async (limit = 10) => {
     const consultations = response.data?.consultations || [];
     return {
       success: true,
-      consultations: consultations.map((c) => ({
-        id: c.id,
-        patientId: c.patient_id,
-        patientName: c.patient_name || 'Unknown Patient',
-        diagnosis: c.diagnosis || 'No diagnosis recorded',
-        date: c.visit_date,
-        time: (() => {
-          if (!c.created_at) return '--:--';
-          const s = String(c.created_at);
-          const iso = s.includes('T') ? s : s.replace(' ', 'T') + 'Z';
-          const d = new Date(iso);
-          return isNaN(d.getTime()) ? '--:--' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        })(),
-      })),
+      consultations: consultations.map((c) => {
+        const visitDateObj = new Date(c.visit_date || c.created_at || new Date().toISOString());
+
+        return {
+          id: c.id,
+          patientId: c.patient_id,
+          patientName: c.patient_name || 'Unknown Patient',
+          diagnosis: c.diagnosis || 'No diagnosis recorded',
+          date: c.visit_date,
+          time: visitDateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+      }),
     };
   } catch (error) {
     throw error.response?.data || { message: 'Failed to fetch consultations' };
@@ -604,6 +643,49 @@ export const updateUserSettings = async (userId, settings) => {
     return response.data;
   } catch (error) {
     throw error.response?.data || { message: 'Failed to update settings' };
+  }
+};
+
+// ============================================
+// VOICE ENROLLMENT (doctor voiceprint for speaker ID)
+// ============================================
+
+export const getVoiceEnrollmentStatus = async () => {
+  try {
+    const response = await api.get('/voice-enrollment');
+    return response.data;
+  } catch (error) {
+    throw error.response?.data || { message: 'Failed to check voice enrollment status' };
+  }
+};
+
+export const enrollVoice = (audioBlob, durationMs) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      try {
+        const base64 = reader.result.split(',')[1];
+        const response = await api.post('/voice-enrollment', {
+          audioBase64: base64,
+          mimeType: audioBlob.type || 'audio/webm',
+          durationMs,
+        });
+        resolve(response.data);
+      } catch (error) {
+        reject(error.response?.data || { message: 'Failed to enroll voice' });
+      }
+    };
+    reader.onerror = () => reject({ message: 'Failed to read audio file' });
+    reader.readAsDataURL(audioBlob);
+  });
+};
+
+export const deleteVoiceEnrollment = async () => {
+  try {
+    const response = await api.delete('/voice-enrollment');
+    return response.data;
+  } catch (error) {
+    throw error.response?.data || { message: 'Failed to remove voice enrollment' };
   }
 };
 

@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from nlp_pipeline import MedicalPipeline, PipelineResult
 from insights_engine import InsightsEngine
+from voice_id import VoiceIdentifier
 
 # ─────────────────────────────────────────────
 # Logging
@@ -77,10 +78,11 @@ app.add_middleware(
 # ─────────────────────────────────────────────
 pipeline: Optional[MedicalPipeline] = None
 insights_engine: Optional[InsightsEngine] = None
+voice_id: Optional[VoiceIdentifier] = None
 
 @app.on_event("startup")
 async def startup():
-    global pipeline, insights_engine
+    global pipeline, insights_engine, voice_id
     logger.info("🚀 Starting Medical-Scribe backend...")
 
     render_runtime = any(
@@ -95,10 +97,21 @@ async def startup():
         low_memory_mode=low_memory_mode,
     )
     insights_engine = InsightsEngine()
+
+    # Resemblyzer's encoder is tiny (~1.5MB) — load it even in low-memory mode. If it fails
+    # to load for any reason (missing optional dependency in some deployment), voice-based
+    # speaker ID just falls back to the existing text-heuristic role assignment.
+    try:
+        voice_id = VoiceIdentifier()
+    except Exception as e:
+        logger.warning(f"Voice identifier failed to load: {e}. Voice-based speaker ID disabled.")
+        voice_id = None
+
     logger.info(
-        "✅ Backend runtime profile: low_memory_mode=%s, WHISPER_MODEL=%s",
+        "✅ Backend runtime profile: low_memory_mode=%s, WHISPER_MODEL=%s, voice_id=%s",
         low_memory_mode,
         whisper_model,
+        bool(voice_id),
     )
     logger.info("✅ Backend ready")
 
@@ -288,6 +301,79 @@ async def transcribe_and_generate(audio: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Audio processing error: {e}")
         raise HTTPException(status_code=500, detail=f"Audio processing failed: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# Per-utterance processing (dual-language transcript pipeline)
+# ─────────────────────────────────────────────
+
+SUPPORTED_LANGUAGES = {"en", "kn", "hi", "ta"}
+MIN_VOICEPRINT_MATCH_DURATION_MS = 800  # clips shorter than this give unstable embeddings
+
+
+@app.post("/api/utterance/process")
+async def process_utterance(audio: UploadFile = File(...)):
+    """
+    Accurately re-transcribe a single diarized utterance clip: auto-detects the spoken
+    language (so a doctor and patient speaking different languages in the same consultation
+    are each transcribed correctly), translates to English, and — if the voice identifier is
+    available — returns a speaker embedding for doctor/patient voice matching.
+    """
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="Pipeline not ready")
+
+    try:
+        audio_bytes = await audio.read()
+
+        transcription = await pipeline.whisper.transcribe(audio_bytes, language=None)
+
+        confidence = transcription.confidence
+        detected_language = transcription.language
+        if detected_language not in SUPPORTED_LANGUAGES:
+            # Keep the actual detected code (don't fabricate a supported one) but flag it
+            # as low-confidence so the caller can surface an "uncertain language" indicator.
+            confidence = min(confidence, 0.3)
+
+        english_text = pipeline.translator.translate(transcription.text, detected_language)
+
+        embedding = None
+        if voice_id is not None and transcription.duration_ms >= MIN_VOICEPRINT_MATCH_DURATION_MS:
+            try:
+                embedding = voice_id.embed_from_bytes(audio_bytes)
+            except Exception as e:
+                logger.warning(f"Voice embedding failed for utterance clip: {e}")
+
+        return {
+            "success": True,
+            "text": transcription.text,
+            "source_language": detected_language,
+            "source_language_confidence": confidence,
+            "english_text": english_text,
+            "duration_ms": transcription.duration_ms,
+            "embedding": embedding,
+        }
+    except Exception as e:
+        logger.error(f"Utterance processing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Utterance processing failed: {str(e)}")
+
+
+# ─────────────────────────────────────────────
+# Doctor voice enrollment
+# ─────────────────────────────────────────────
+
+@app.post("/api/voice-enrollment/embed")
+async def voice_enrollment_embed(audio: UploadFile = File(...)):
+    """Compute a voiceprint embedding from a doctor's enrollment sample clip."""
+    if voice_id is None:
+        raise HTTPException(status_code=503, detail="Voice identification is not available on this server")
+
+    try:
+        audio_bytes = await audio.read()
+        embedding = voice_id.embed_from_bytes(audio_bytes)
+        return {"success": True, "embedding": embedding}
+    except Exception as e:
+        logger.error(f"Voice enrollment error: {e}")
+        raise HTTPException(status_code=500, detail=f"Voice enrollment failed: {str(e)}")
 
 
 # ─────────────────────────────────────────────

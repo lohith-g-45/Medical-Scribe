@@ -19,6 +19,25 @@ export const formatTime = (date) => {
   });
 };
 
+export const buildBusinessHoursTimestamp = (seed, fallbackDate) => {
+  const base = new Date(fallbackDate || Date.now());
+  if (Number.isNaN(base.getTime())) {
+    return new Date();
+  }
+
+  const text = String(seed ?? fallbackDate ?? 'seed');
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  }
+
+  const hour = 9 + (hash % 9);
+  const minute = (hash * 7 + 13) % 60;
+
+  base.setHours(hour, minute, 0, 0);
+  return base;
+};
+
 // Format duration in seconds to MM:SS
 export const formatDuration = (seconds) => {
   const mins = Math.floor(seconds / 60);

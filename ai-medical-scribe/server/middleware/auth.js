@@ -9,7 +9,7 @@ const requireAuth = (req, res, next) => {
     }
 
     const token = authHeader.slice(7).trim();
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default_secret');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     req.user = {
       id: decoded.id,

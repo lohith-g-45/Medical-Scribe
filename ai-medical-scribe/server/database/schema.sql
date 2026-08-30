@@ -15,9 +15,14 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 -- Patients Table
+-- patient_name, age, gender, phone, email, address, medical_history, allergies, blood_group
+-- are all encrypted at rest at the application layer (see server/utils/fieldEncryption.js) —
+-- stored as TEXT since ciphertext is longer than the original plaintext, and NOT indexed
+-- directly (a random-IV ciphertext has no stable sort/search order). phone_hash/email_hash
+-- are deterministic lookup hashes used for exact-match search instead.
 CREATE TABLE IF NOT EXISTS patients (
     id INT PRIMARY KEY AUTO_INCREMENT,
-    patient_name VARCHAR(255) NOT NULL,
+    patient_name TEXT NOT NULL,
     age TEXT NOT NULL,
     gender TEXT NOT NULL,
     phone TEXT,
@@ -30,7 +35,7 @@ CREATE TABLE IF NOT EXISTS patients (
     email_hash VARCHAR(64),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_patient_name (patient_name),
+    deleted_at TIMESTAMP NULL DEFAULT NULL,
     INDEX idx_phone_hash (phone_hash),
     INDEX idx_email_hash (email_hash)
 );
@@ -48,16 +53,53 @@ CREATE TABLE IF NOT EXISTS consultations (
     plan TEXT,
     diagnosis TEXT,
     medications TEXT,
+    -- AI-suggested medications live separately from `medications` (which is strictly
+    -- transcript-grounded) so a doctor can never mistake an AI guess for something that
+    -- was actually said. A suggestion only moves into `medications` once explicitly confirmed.
+    medications_ai_suggested TEXT NULL,
+    medications_ai_suggested_confirmed TINYINT(1) DEFAULT 0,
     follow_up TEXT,
     status ENUM('in-progress', 'completed', 'cancelled') DEFAULT 'completed',
     duration INT COMMENT 'Duration in minutes',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP NULL DEFAULT NULL,
     FOREIGN KEY (patient_id) REFERENCES patients(id) ON DELETE CASCADE,
     FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE CASCADE,
     INDEX idx_patient_id (patient_id),
     INDEX idx_doctor_id (doctor_id),
     INDEX idx_visit_date (visit_date)
+);
+
+-- Per-utterance dual-language transcript rows. Populated after diarization/voice-ID —
+-- consultations.transcript stays a derived, English-joined summary rebuilt from these rows.
+CREATE TABLE IF NOT EXISTS consultation_utterances (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    consultation_id INT NOT NULL,
+    sequence_no INT NOT NULL,
+    speaker_role ENUM('doctor', 'patient', 'unknown') NOT NULL,
+    raw_speaker_label VARCHAR(16),
+    start_ms INT,
+    end_ms INT,
+    source_language_code VARCHAR(8) NOT NULL,
+    source_language_confidence FLOAT,
+    original_text LONGTEXT,
+    english_text LONGTEXT,
+    speaker_match_confidence FLOAT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (consultation_id) REFERENCES consultations(id) ON DELETE CASCADE,
+    INDEX idx_consultation_id (consultation_id)
+);
+
+-- One active voiceprint per doctor, used to identify their voice in a diarized recording
+-- regardless of what either speaker says or which language they use.
+CREATE TABLE IF NOT EXISTS doctor_voiceprints (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL UNIQUE,
+    embedding LONGTEXT NOT NULL,
+    sample_duration_ms INT,
+    enrolled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 -- Prescriptions Table

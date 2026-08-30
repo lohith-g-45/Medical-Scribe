@@ -10,10 +10,12 @@ const CONSULTATION_SENSITIVE_FIELDS = [
   'plan',
   'diagnosis',
   'medications',
+  'medications_ai_suggested',
   'follow_up',
 ];
 
 const PATIENT_SENSITIVE_FIELDS = [
+  'patient_name',
   'age',
   'gender',
   'phone',
@@ -24,21 +26,39 @@ const PATIENT_SENSITIVE_FIELDS = [
   'blood_group',
 ];
 
+const UTTERANCE_SENSITIVE_FIELDS = [
+  'original_text',
+  'english_text',
+];
+
+// A voiceprint embedding is biometric data — treat it with the same care as PHI.
+const VOICEPRINT_SENSITIVE_FIELDS = [
+  'embedding',
+];
+
 let cachedKey = null;
 
 function resolveEncryptionKey() {
   if (cachedKey) return cachedKey;
 
   const explicit = process.env.MEDICAL_DATA_ENCRYPTION_KEY || '';
-  const fallback = process.env.JWT_SECRET || '';
-  const source = explicit || fallback;
 
-  if (!source) {
-    throw new Error('Missing encryption key. Set MEDICAL_DATA_ENCRYPTION_KEY in server/.env');
+  if (!explicit) {
+    throw new Error(
+      'Missing encryption key. Set MEDICAL_DATA_ENCRYPTION_KEY in server/.env to a long random value ' +
+      '(it must NOT be the same as JWT_SECRET — they protect different things).'
+    );
+  }
+
+  if (explicit === (process.env.JWT_SECRET || '')) {
+    throw new Error(
+      'MEDICAL_DATA_ENCRYPTION_KEY must not be equal to JWT_SECRET. ' +
+      'Using the same secret for token signing and data encryption means a JWT leak also exposes patient data.'
+    );
   }
 
   // Derive a stable 32-byte key from env string.
-  cachedKey = crypto.createHash('sha256').update(String(source), 'utf8').digest();
+  cachedKey = crypto.createHash('sha256').update(String(explicit), 'utf8').digest();
   return cachedKey;
 }
 
@@ -102,9 +122,9 @@ function decryptValue(value) {
   return plain.toString('utf8');
 }
 
-function encryptConsultationFields(input = {}) {
+function encryptFields(sensitiveFields, input = {}) {
   const out = { ...input };
-  for (const field of CONSULTATION_SENSITIVE_FIELDS) {
+  for (const field of sensitiveFields) {
     if (field in out) {
       out[field] = encryptValue(out[field]);
     }
@@ -112,14 +132,17 @@ function encryptConsultationFields(input = {}) {
   return out;
 }
 
-function decryptConsultationFields(record = {}) {
+function decryptFields(sensitiveFields, tableName, record = {}) {
   const out = { ...record };
-  for (const field of CONSULTATION_SENSITIVE_FIELDS) {
+  for (const field of sensitiveFields) {
     if (field in out) {
       try {
         out[field] = decryptValue(out[field]);
-      } catch (_err) {
-        // Do not leak sensitive cryptographic internals in API responses/logs.
+      } catch (err) {
+        // Do not leak sensitive cryptographic internals in API responses, but DO
+        // surface that a decrypt failed (wrong/rotated key, corrupted data) — silently
+        // returning null hides key-management bugs behind blank medical records.
+        console.error(`[fieldEncryption] Failed to decrypt ${tableName}.${field} for record id=${record.id ?? 'unknown'}: ${err.message}`);
         out[field] = null;
       }
     }
@@ -127,29 +150,14 @@ function decryptConsultationFields(record = {}) {
   return out;
 }
 
-function encryptPatientFields(input = {}) {
-  const out = { ...input };
-  for (const field of PATIENT_SENSITIVE_FIELDS) {
-    if (field in out) {
-      out[field] = encryptValue(out[field]);
-    }
-  }
-  return out;
-}
-
-function decryptPatientFields(record = {}) {
-  const out = { ...record };
-  for (const field of PATIENT_SENSITIVE_FIELDS) {
-    if (field in out) {
-      try {
-        out[field] = decryptValue(out[field]);
-      } catch (_err) {
-        out[field] = null;
-      }
-    }
-  }
-  return out;
-}
+const encryptConsultationFields = (input) => encryptFields(CONSULTATION_SENSITIVE_FIELDS, input);
+const decryptConsultationFields = (record) => decryptFields(CONSULTATION_SENSITIVE_FIELDS, 'consultations', record);
+const encryptPatientFields = (input) => encryptFields(PATIENT_SENSITIVE_FIELDS, input);
+const decryptPatientFields = (record) => decryptFields(PATIENT_SENSITIVE_FIELDS, 'patients', record);
+const encryptUtteranceFields = (input) => encryptFields(UTTERANCE_SENSITIVE_FIELDS, input);
+const decryptUtteranceFields = (record) => decryptFields(UTTERANCE_SENSITIVE_FIELDS, 'consultation_utterances', record);
+const encryptVoiceprintFields = (input) => encryptFields(VOICEPRINT_SENSITIVE_FIELDS, input);
+const decryptVoiceprintFields = (record) => decryptFields(VOICEPRINT_SENSITIVE_FIELDS, 'doctor_voiceprints', record);
 
 function buildPatientLookupHashes(input = {}) {
   const out = {};
@@ -170,6 +178,8 @@ function buildPatientLookupHashes(input = {}) {
 module.exports = {
   CONSULTATION_SENSITIVE_FIELDS,
   PATIENT_SENSITIVE_FIELDS,
+  UTTERANCE_SENSITIVE_FIELDS,
+  VOICEPRINT_SENSITIVE_FIELDS,
   encryptValue,
   decryptValue,
   isEncrypted,
@@ -180,5 +190,9 @@ module.exports = {
   decryptConsultationFields,
   encryptPatientFields,
   decryptPatientFields,
+  encryptUtteranceFields,
+  decryptUtteranceFields,
+  encryptVoiceprintFields,
+  decryptVoiceprintFields,
   buildPatientLookupHashes,
 };

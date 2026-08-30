@@ -29,7 +29,13 @@ async function run() {
     if (await indexExists('patients', 'idx_phone')) {
       await db.query('ALTER TABLE patients DROP INDEX idx_phone');
     }
+    if (await indexExists('patients', 'idx_patient_name')) {
+      await db.query('ALTER TABLE patients DROP INDEX idx_patient_name');
+    }
 
+    // patient_name is now encrypted at rest — widen from VARCHAR(255) to TEXT since
+    // ciphertext (enc_v1: prefix + base64 IV/tag/data) can exceed the original column size.
+    await db.query('ALTER TABLE patients MODIFY COLUMN patient_name TEXT NOT NULL');
     await db.query('ALTER TABLE patients MODIFY COLUMN age TEXT NOT NULL');
     await db.query('ALTER TABLE patients MODIFY COLUMN gender TEXT NOT NULL');
     await db.query('ALTER TABLE patients MODIFY COLUMN phone TEXT NULL');

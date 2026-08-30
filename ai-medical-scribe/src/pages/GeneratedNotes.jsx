@@ -6,7 +6,7 @@ import Header from '../components/layout/Header';
 import SOAPEditor from '../components/SOAPEditor';
 import ConsultationReport from '../components/ConsultationReport';
 import { useAppContext } from '../context/AppContext';
-import { regenerateNotes, saveConsultation } from '../services/api';
+import { regenerateNotes, saveConsultation, suggestMedications } from '../services/api';
 import { useToast } from '../components/Toast';
 import { generateConsultationPDF } from '../utils/pdfGenerator';
 import { detectSurgeryContext } from '../utils/surgeryVideos';
@@ -14,7 +14,7 @@ import { detectSurgeryContext } from '../utils/surgeryVideos';
 const GeneratedNotes = () => {
   const navigate = useNavigate();
   const toast = useToast();
-  const { generatedNotes, setGeneratedNotes, transcript, utterances, clearConsultation, patientInfo, user, recordingTime } = useAppContext();
+  const { generatedNotes, setGeneratedNotes, transcript, utterances, dualLanguageUtterances, clearConsultation, patientInfo, user, recordingTime } = useAppContext();
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -61,10 +61,16 @@ const GeneratedNotes = () => {
         plan: notes?.plan || '',
         diagnosis: notes?.assessment || 'General consultation',
         medications: notes?.medications || 'None prescribed',
+        // AI-suggested medications are stored separately from `medications` — they were
+        // never stated in the consultation and must not be presented as if they were.
+        medications_ai_suggested: notes?.medicationsAiSuggested || null,
         follow_up: 'As advised by doctor',
         status: 'completed',
         // Store live duration in minutes (supports decimals like 5.2)
         duration: derivedDuration,
+        // Per-utterance dual-language transcript rows (original spoken language + English)
+        // from /api/diarize, persisted alongside the consultation.
+        utterances: dualLanguageUtterances || [],
       };
 
       if (!payload.patient_id || !payload.doctor_id) {
@@ -161,6 +167,7 @@ const GeneratedNotes = () => {
               initialNotes={generatedNotes}
               onSave={handleSaveNotes}
               onRegenerate={handleRegenerate}
+              onSuggestMedications={() => suggestMedications(transcript, generatedNotes)}
               isEditable={true}
             />
           </motion.div>

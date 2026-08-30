@@ -173,29 +173,6 @@ const PatientDetail = () => {
     });
   };
 
-  const handleVirtualSurgery = (consultation) => {
-    if (!hasSurgery(consultation)) {
-      toast.warning('Virtual surgery is available only for heart-related surgical consultations.');
-      return;
-    }
-
-    navigate('/virtual-coronary-planning', {
-      state: {
-        notes: consultation.notes,
-        transcript: consultation.transcript,
-        patientInfo: {
-          patientName: patient.name,
-          age: patient.age,
-          gender: patient.gender,
-          phone: patient.phone,
-          email: patient.email,
-          address: patient.address,
-          dateOfVisit: consultation.date,
-        },
-      },
-    });
-  };
-
   const hasSurgery = (consultation) =>
     detectSurgeryContext(consultation?.notes, consultation?.transcript).hasSurgery;
 
@@ -672,22 +649,13 @@ const PatientDetail = () => {
                         <span>Download PDF</span>
                       </button>
                       {hasSurgery(consultation) && (
-                        <>
-                          <button
-                            onClick={() => handleView3D(consultation)}
-                            className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors text-sm"
-                          >
-                            <Activity size={15} />
-                            <span>3D Visualization</span>
-                          </button>
-                          <button
-                            onClick={() => handleVirtualSurgery(consultation)}
-                            className="flex items-center gap-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-colors text-sm"
-                          >
-                            <Activity size={15} />
-                            <span>Virtual Surgery</span>
-                          </button>
-                        </>
+                        <button
+                          onClick={() => handleView3D(consultation)}
+                          className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors text-sm"
+                        >
+                          <Activity size={15} />
+                          <span>3D Visualization</span>
+                        </button>
                       )}
                     </div>
                   </motion.div>
@@ -716,22 +684,13 @@ const PatientDetail = () => {
                 <span>{isUpdatingPrescription ? 'Updating Prescription...' : 'Auto-fill Prescription (AI)'}</span>
               </button>
               {hasSurgery(selectedConsultation) && (
-                <>
-                  <button
-                    onClick={() => handleView3D(selectedConsultation)}
-                    className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors text-sm"
-                  >
-                    <Activity size={15} />
-                    <span>3D Visualization</span>
-                  </button>
-                  <button
-                    onClick={() => handleVirtualSurgery(selectedConsultation)}
-                    className="flex items-center gap-2 px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg transition-colors text-sm"
-                  >
-                    <Activity size={15} />
-                    <span>Virtual Surgery</span>
-                  </button>
-                </>
+                <button
+                  onClick={() => handleView3D(selectedConsultation)}
+                  className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg transition-colors text-sm"
+                >
+                  <Activity size={15} />
+                  <span>3D Visualization</span>
+                </button>
               )}
               <button
                 onClick={() => handleDownloadPDF(selectedConsultation)}

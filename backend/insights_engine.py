@@ -76,7 +76,9 @@ Respond in JSON format:
 }}"""
 
             response = self.client.chat.completions.create(
-                model="mixtral-8x7b-32768",
+                # mixtral-8x7b-32768 was decommissioned by Groq; openai/gpt-oss-120b is a
+                # current, capable model on Groq's API.
+                model="openai/gpt-oss-120b",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=500,

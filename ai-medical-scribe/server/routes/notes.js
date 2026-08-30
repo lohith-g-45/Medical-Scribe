@@ -3,7 +3,9 @@ const router = express.Router();
 const https = require('https');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'llama-3.1-8b-instant';
+// llama-3.1-8b-instant was decommissioned by Groq; openai/gpt-oss-120b is a current,
+// capable instruction-following model on Groq's API, well-suited to structured JSON output.
+const GROQ_MODEL = 'openai/gpt-oss-120b';
 
 function normalizeMedicationsValue(value) {
   const normalized = String(value || '').trim();
@@ -176,9 +178,9 @@ Rules:
 - history: History of present illness — onset, duration, severity, associated symptoms mentioned by the patient
 - past_medical_history: Any mentioned prior conditions, allergies, medications, surgeries (write "Not mentioned" if absent)
 - assessment: Doctor's clinical assessment, findings, and likely diagnosis
-- plan: Treatment plan including medications, tests ordered, referrals, follow-up instructions
-- medications: If medications were prescribed in the transcript, return those only (name + dose/frequency if available). If not explicitly prescribed, suggest 1-3 conservative first-line symptom-based medications. If no reasonable medication is indicated, return "None prescribed".
-- Use proper medical terminology. Be concise and clinical. Do NOT include raw conversation text.`;
+- plan: Treatment plan including tests ordered, referrals, follow-up instructions — do NOT invent medications here either
+- medications: List ONLY medications that were explicitly stated as prescribed or administered in the transcript (name + dose/frequency if stated). Do NOT infer, guess, or suggest medications that were not actually said. If none were mentioned, return an empty string "".
+- Use proper medical terminology. Be concise and clinical. Do NOT include raw conversation text. Never state something happened or was said if it is not actually present in the transcript — an empty or "Not mentioned" field is correct and expected when information wasn't discussed.`;
 
   const userMessage = `${patientContext ? `Patient: ${patientContext}\n\n` : ''}Consultation Transcript:\n${transcript}`;
 
@@ -193,10 +195,11 @@ Rules:
     if (!jsonMatch) throw new Error('LLM did not return valid JSON');
     const soap = JSON.parse(jsonMatch[0]);
 
+    // Strictly transcript-grounded — no fabricated/suggested medications blended in here.
+    // A doctor requests suggestions explicitly via POST /api/notes/suggest-medications.
     const normalizedMeds = normalizeMedicationsValue(soap.medications);
     const inferredMeds = normalizedMeds || inferMedicationsFromText(soap, transcript);
-    const suggestedMeds = inferredMeds ? '' : suggestMedicationsFromSymptoms(soap, transcript);
-    const medications = normalizeMedicationsValue(inferredMeds || suggestedMeds) || 'None prescribed';
+    const medications = normalizeMedicationsValue(inferredMeds) || 'None prescribed';
 
     res.json({
       soap_notes: {
@@ -214,6 +217,32 @@ Rules:
     console.error('Groq SOAP generation error:', error.message);
     res.status(500).json({ error: 'Failed to generate notes: ' + error.message });
   }
+});
+
+// POST /api/notes/suggest-medications
+// Explicit, opt-in AI medication suggestions — kept entirely separate from the
+// transcript-grounded `medications` field above so a doctor never mistakes an AI
+// guess for something the patient/doctor actually said.
+router.post('/suggest-medications', async (req, res) => {
+  const { transcript = '', soap_notes = {} } = req.body;
+
+  if (!transcript.trim() && !Object.values(soap_notes).some(Boolean)) {
+    return res.status(400).json({ error: 'Transcript or SOAP notes are required to suggest medications' });
+  }
+
+  const suggested = suggestMedicationsFromSymptoms(
+    {
+      chief_complaint: soap_notes.chiefComplaint || soap_notes.chief_complaint,
+      history: soap_notes.historyOfPresentIllness || soap_notes.history,
+      assessment: soap_notes.assessment,
+    },
+    transcript
+  );
+
+  res.json({
+    medications_suggested: suggested || '',
+    note: 'These are AI-generated suggestions based on reported symptoms — not something stated in the consultation. Review and confirm before adding to the record.',
+  });
 });
 
 module.exports = router;
