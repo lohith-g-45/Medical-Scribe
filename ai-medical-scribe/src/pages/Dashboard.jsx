@@ -144,9 +144,14 @@ const Dashboard = () => {
                       <p className="text-sm font-medium text-gray-900">
                         {consultation.time}
                       </p>
-                      <p className="text-xs text-gray-500">
-                        {formatDate(consultation.date)}
-                      </p>
+                      <div className="flex items-center justify-end gap-2 text-xs text-gray-500">
+                        <span>{formatDate(consultation.date)}</span>
+                        {consultation.duration && (
+                          <span className="text-blue-600 font-medium">
+                            {consultation.duration} min
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </motion.div>
                 ))}

@@ -613,6 +613,11 @@ const PatientDetail = () => {
                           <Calendar size={13} className="mr-1" />
                           {formatDate(consultation.date)} at {consultation.time}
                         </span>
+                        {consultation.duration && (
+                          <span className="text-blue-600 font-medium bg-blue-50 px-2 py-1 rounded">
+                            {consultation.duration} min
+                          </span>
+                        )}
                         <span className="text-blue-600 font-medium">Dr. {consultation.doctor}</span>
                       </div>
                     </div>

@@ -616,6 +616,7 @@ export const getRecentConsultations = async (limit = 10) => {
           diagnosis: c.diagnosis || 'No diagnosis recorded',
           date: c.visit_date,
           time: visitDateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          duration: c.duration || null,
         };
       }),
     };
